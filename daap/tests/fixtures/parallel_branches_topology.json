@@ -1,0 +1,85 @@
+{
+  "topology_id": "test-parallel-branches-001",
+  "version": 1,
+  "created_at": "2026-04-13T10:00:00Z",
+  "user_prompt": "Parallel branches topology for testing parallel execution grouping.",
+  "nodes": [
+    {
+      "node_id": "input_parser",
+      "role": "Input Parser",
+      "model_tier": "fast",
+      "system_prompt": "Parse the user input into structured data.",
+      "tools": [],
+      "inputs": [],
+      "outputs": [
+        {"data_key": "parsed_input", "data_type": "string", "description": "structured input data"}
+      ],
+      "instance_config": {"parallel_instances": 1, "consolidation": null},
+      "handoff_mode": "never",
+      "agent_mode": "single"
+    },
+    {
+      "node_id": "researcher_a",
+      "role": "Researcher A",
+      "model_tier": "fast",
+      "system_prompt": "Research branch A.",
+      "tools": [{"name": "WebSearch"}],
+      "inputs": [
+        {"data_key": "parsed_input", "data_type": "string", "description": "structured input"}
+      ],
+      "outputs": [
+        {"data_key": "research_a", "data_type": "string", "description": "research results A"}
+      ],
+      "instance_config": {"parallel_instances": 1, "consolidation": null},
+      "handoff_mode": "never",
+      "agent_mode": "react"
+    },
+    {
+      "node_id": "researcher_b",
+      "role": "Researcher B",
+      "model_tier": "fast",
+      "system_prompt": "Research branch B.",
+      "tools": [{"name": "WebSearch"}],
+      "inputs": [
+        {"data_key": "parsed_input", "data_type": "string", "description": "structured input"}
+      ],
+      "outputs": [
+        {"data_key": "research_b", "data_type": "string", "description": "research results B"}
+      ],
+      "instance_config": {"parallel_instances": 1, "consolidation": null},
+      "handoff_mode": "never",
+      "agent_mode": "react"
+    },
+    {
+      "node_id": "synthesizer",
+      "role": "Synthesizer",
+      "model_tier": "smart",
+      "system_prompt": "Synthesize research from both branches into a final output.",
+      "tools": [],
+      "inputs": [
+        {"data_key": "research_a", "data_type": "string", "description": "research A"},
+        {"data_key": "research_b", "data_type": "string", "description": "research B"}
+      ],
+      "outputs": [
+        {"data_key": "final_output", "data_type": "string", "description": "synthesized output"}
+      ],
+      "instance_config": {"parallel_instances": 1, "consolidation": null},
+      "handoff_mode": "never",
+      "agent_mode": "single"
+    }
+  ],
+  "edges": [
+    {"source_node_id": "input_parser",  "target_node_id": "researcher_a", "data_key": "parsed_input", "description": ""},
+    {"source_node_id": "input_parser",  "target_node_id": "researcher_b", "data_key": "parsed_input", "description": ""},
+    {"source_node_id": "researcher_a",  "target_node_id": "synthesizer",  "data_key": "research_a",   "description": ""},
+    {"source_node_id": "researcher_b",  "target_node_id": "synthesizer",  "data_key": "research_b",   "description": ""}
+  ],
+  "constraints": {
+    "max_cost_usd": 1.00,
+    "max_latency_seconds": 120.0,
+    "max_nodes": 10,
+    "max_total_instances": 20,
+    "max_retries_per_node": 2
+  },
+  "metadata": {"purpose": "parallel branches test"}
+}

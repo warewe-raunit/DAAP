@@ -1,0 +1,62 @@
+{
+  "simple_tasks": [
+    {
+      "id": "simple_email",
+      "prompt": "Write me a cold email for a project management SaaS targeting HR directors about automated onboarding.",
+      "expected_mode": "direct",
+      "description": "Specific enough to handle directly — no clarification needed"
+    },
+    {
+      "id": "simple_advice",
+      "prompt": "What's a good subject line for a cold email to CTOs?",
+      "expected_mode": "direct",
+      "description": "Advice question — direct response"
+    },
+    {
+      "id": "simple_brainstorm",
+      "prompt": "Give me 5 value propositions for a B2B invoicing SaaS targeting freelancers.",
+      "expected_mode": "direct",
+      "description": "Brainstorm — direct response"
+    }
+  ],
+  "vague_requests": [
+    {
+      "id": "vague_leads",
+      "prompt": "I need leads.",
+      "expected_mode": "ask_user",
+      "description": "Missing product, ICP, industry — must ask questions"
+    },
+    {
+      "id": "vague_outreach",
+      "prompt": "Help me with outreach.",
+      "expected_mode": "ask_user",
+      "description": "Too vague — outreach to whom? for what product?"
+    },
+    {
+      "id": "vague_startup",
+      "prompt": "I'm a startup and I need customers.",
+      "expected_mode": "ask_user",
+      "description": "No product info, no ICP, no target industry"
+    }
+  ],
+  "complex_tasks": [
+    {
+      "id": "full_outreach_pipeline",
+      "prompt": "Find B2B leads for my project management SaaS targeting mid-size construction companies and draft personalized cold emails.",
+      "expected_mode": "topology",
+      "description": "Research + evaluate + personalize + write — multi-agent pipeline"
+    },
+    {
+      "id": "market_research",
+      "prompt": "Research the competitive landscape for project management tools in construction, identify the top 10 competitors, and summarize their key differentiators.",
+      "expected_mode": "topology",
+      "description": "Research + synthesis — multi-agent"
+    },
+    {
+      "id": "lead_enrichment",
+      "prompt": "Take this list of 50 companies and enrich each one with recent news, key decision makers, and LinkedIn presence. Then score them by ICP fit.",
+      "expected_mode": "topology",
+      "description": "Enrichment + scoring — parallel research then evaluation"
+    }
+  ]
+}

@@ -1,0 +1,161 @@
+{
+  "topology_id": "test-sales-outreach-001",
+  "version": 1,
+  "created_at": "2026-04-13T10:00:00Z",
+  "user_prompt": "Find B2B leads for my project management SaaS targeting mid-size construction companies. Draft personalized cold emails.",
+  "operator_config": {
+    "provider": "openrouter",
+    "base_url": "https://openrouter.ai/api/v1",
+    "api_key_env": "OPENROUTER_API_KEY",
+    "model_map": {
+      "fast": "claude-haiku-4-5-20251001",
+      "smart": "claude-sonnet-4-6",
+      "powerful": "claude-opus-4-6"
+    }
+  },
+  "nodes": [
+    {
+      "node_id": "lead_researcher",
+      "role": "Lead Researcher",
+      "model_tier": "fast",
+      "system_prompt": "You are a B2B lead researcher. Search the web for companies matching the ideal customer profile. Return structured lead data: company name, website, industry, employee count, key decision makers.",
+      "tools": [
+        {"name": "WebSearch"},
+        {"name": "WebFetch"},
+        {"name": "mcp://linkedin"}
+      ],
+      "inputs": [],
+      "outputs": [
+        {
+          "data_key": "raw_leads",
+          "data_type": "list[Lead]",
+          "description": "Raw list of B2B leads with company info and contacts"
+        }
+      ],
+      "instance_config": {
+        "parallel_instances": 4,
+        "consolidation": "deduplicate"
+      },
+      "handoff_mode": "never",
+      "agent_mode": "react"
+    },
+    {
+      "node_id": "lead_evaluator",
+      "role": "Lead Evaluator",
+      "model_tier": "smart",
+      "system_prompt": "You are a lead qualification expert. Score each lead on ICP fit (company size, industry match, decision maker access). Rank by likelihood to convert. Filter out poor fits.",
+      "tools": [
+        {"name": "WebSearch"}
+      ],
+      "inputs": [
+        {
+          "data_key": "raw_leads",
+          "data_type": "list[Lead]",
+          "description": "Raw unfiltered leads from researcher"
+        }
+      ],
+      "outputs": [
+        {
+          "data_key": "qualified_leads",
+          "data_type": "list[QualifiedLead]",
+          "description": "Scored and ranked leads, filtered to top candidates"
+        }
+      ],
+      "instance_config": {
+        "parallel_instances": 2,
+        "consolidation": "rank"
+      },
+      "handoff_mode": "never",
+      "agent_mode": "react"
+    },
+    {
+      "node_id": "personalization_researcher",
+      "role": "Personalization Researcher",
+      "model_tier": "smart",
+      "system_prompt": "You are a personalization specialist. For each qualified lead, research recent company news, the decision maker's background, and potential pain points. Produce a personalization brief per lead.",
+      "tools": [
+        {"name": "WebSearch"},
+        {"name": "WebFetch"}
+      ],
+      "inputs": [
+        {
+          "data_key": "qualified_leads",
+          "data_type": "list[QualifiedLead]",
+          "description": "Top qualified leads to personalize for"
+        }
+      ],
+      "outputs": [
+        {
+          "data_key": "personalization_briefs",
+          "data_type": "list[PersonalizationBrief]",
+          "description": "Per-lead research briefs with personalization hooks"
+        }
+      ],
+      "instance_config": {
+        "parallel_instances": 1,
+        "consolidation": null
+      },
+      "handoff_mode": "never",
+      "agent_mode": "react"
+    },
+    {
+      "node_id": "email_drafter",
+      "role": "Email Drafter",
+      "model_tier": "smart",
+      "system_prompt": "You are a cold email copywriter. Draft personalized cold emails for each lead using the personalization briefs. Each email should be concise (<150 words), have a compelling subject line, and a clear CTA.",
+      "tools": [],
+      "inputs": [
+        {
+          "data_key": "personalization_briefs",
+          "data_type": "list[PersonalizationBrief]",
+          "description": "Research briefs with personalization hooks per lead"
+        }
+      ],
+      "outputs": [
+        {
+          "data_key": "email_drafts",
+          "data_type": "list[Email]",
+          "description": "Final personalized cold email drafts"
+        }
+      ],
+      "instance_config": {
+        "parallel_instances": 1,
+        "consolidation": null
+      },
+      "handoff_mode": "never",
+      "agent_mode": "single"
+    }
+  ],
+  "edges": [
+    {
+      "source_node_id": "lead_researcher",
+      "target_node_id": "lead_evaluator",
+      "data_key": "raw_leads",
+      "description": "Raw leads flow from researcher to evaluator for scoring"
+    },
+    {
+      "source_node_id": "lead_evaluator",
+      "target_node_id": "personalization_researcher",
+      "data_key": "qualified_leads",
+      "description": "Top qualified leads flow to personalization research"
+    },
+    {
+      "source_node_id": "personalization_researcher",
+      "target_node_id": "email_drafter",
+      "data_key": "personalization_briefs",
+      "description": "Personalization briefs flow to email drafting"
+    }
+  ],
+  "constraints": {
+    "max_cost_usd": 1.00,
+    "max_latency_seconds": 120.0,
+    "max_nodes": 10,
+    "max_total_instances": 20,
+    "max_retries_per_node": 2
+  },
+  "metadata": {
+    "task_type": "sales_outreach",
+    "target_vertical": "construction",
+    "generated_by": "manual_test"
+  }
+}
