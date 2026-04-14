@@ -39,6 +39,7 @@ from daap.master.tools import clear_last_topology_result, get_last_topology_resu
 from daap.spec.schema import TopologySpec
 from daap.spec.resolver import resolve_topology
 from daap.executor.engine import execute_topology
+from daap.topology.store import TopologyStore
 from daap.tools.token_tracker import TokenTracker
 
 
@@ -194,8 +195,9 @@ async def main():
     # Init session
     session_mgr = SessionManager()
     session = session_mgr.create_session()
+    topology_store = TopologyStore()
     session.token_tracker = TokenTracker()
-    toolkit = create_session_scoped_toolkit(session)
+    toolkit = create_session_scoped_toolkit(session, topology_store=topology_store)
     session.master_agent = create_master_agent_with_toolkit(
         toolkit,
         tracker=session.token_tracker,
@@ -231,7 +233,7 @@ async def main():
             print("Bye!")
             break
 
-        if _is_approve and session.pending_topology is not None:
+        if _is_approve:
             if session.pending_topology is None:
                 _print_warn("No topology pending. Ask me to build one first.")
                 continue
@@ -267,6 +269,31 @@ async def main():
 
                 session.pending_topology = None
                 session.pending_estimate = None
+
+                # Auto-save topology + run history (non-fatal on storage errors).
+                try:
+                    saved = topology_store.save_topology(
+                        spec=topology_spec.model_dump(),
+                        user_id=session.user_id,
+                        overwrite=True,
+                    )
+                    topology_store.save_run(
+                        topology_id=saved.topology_id,
+                        topology_version=saved.version,
+                        user_id=session.user_id,
+                        result={
+                            "topology_id": result.topology_id,
+                            "final_output": result.final_output,
+                            "success": result.success,
+                            "error": result.error,
+                            "latency_seconds": result.total_latency_seconds,
+                            "total_input_tokens": result.total_input_tokens,
+                            "total_output_tokens": result.total_output_tokens,
+                        },
+                        user_prompt=user_prompt,
+                    )
+                except Exception as _save_exc:
+                    _print_warn(f"Auto-save failed (run still completed): {_save_exc}")
 
                 if result.success:
                     # Inject result into conversation so agent can discuss it

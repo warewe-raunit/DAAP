@@ -207,6 +207,7 @@ async def _execute_pending_topology(
     websocket: WebSocket,
     session: Session,
     daap_memory=None,
+    topology_store=None,
 ) -> None:
     """Execute the currently pending topology and stream progress updates."""
     if session.is_executing:
@@ -329,14 +330,33 @@ async def _execute_pending_topology(
         if callback_tasks:
             await asyncio.gather(*callback_tasks, return_exceptions=True)
 
-        session.is_executing = False
         session.execution_result = {
             "topology_id": result.topology_id,
             "final_output": result.final_output,
             "success": result.success,
             "error": result.error,
             "latency_seconds": result.total_latency_seconds,
+            "total_input_tokens": result.total_input_tokens,
+            "total_output_tokens": result.total_output_tokens,
         }
+
+        # Auto-save topology + run to persistent store.
+        if topology_store is not None:
+            try:
+                saved = topology_store.save_topology(
+                    spec=session.pending_topology,
+                    user_id=session.user_id,
+                    overwrite=True,
+                )
+                topology_store.save_run(
+                    topology_id=saved.topology_id,
+                    topology_version=saved.version,
+                    user_id=session.user_id,
+                    result=session.execution_result,
+                    user_prompt=user_prompt,
+                )
+            except Exception as exc:
+                logger.warning("Auto-save topology failed (non-fatal): %s", exc)
 
         if result.success:
             session.execution_progress.update({
@@ -399,7 +419,6 @@ async def _execute_pending_topology(
             })
 
     except Exception as exc:
-        session.is_executing = False
         session.execution_progress.update({
             "status": "failed",
             "error": str(exc),
@@ -408,6 +427,10 @@ async def _execute_pending_topology(
             "type": "error",
             "message": f"Execution error: {exc}",
         })
+    finally:
+        # Always release the lock — guards against CancelledError and any
+        # other BaseException subclass that bypasses the except block.
+        session.is_executing = False
 
 
 # ---------------------------------------------------------------------------
@@ -418,6 +441,7 @@ async def handle_websocket(
     websocket: WebSocket,
     session: Session,
     daap_memory=None,
+    topology_store=None,
 ) -> None:
     """
     Handle a full WebSocket conversation with the master agent.
@@ -470,6 +494,7 @@ async def handle_websocket(
                                 websocket,
                                 session,
                                 daap_memory=daap_memory,
+                                topology_store=topology_store,
                             )
                             continue
 
@@ -511,6 +536,7 @@ async def handle_websocket(
                     websocket,
                     session,
                     daap_memory=daap_memory,
+                    topology_store=topology_store,
                 )
 
             # ------------------------------------------------------------------
