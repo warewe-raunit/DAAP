@@ -107,6 +107,7 @@ def create_session_scoped_toolkit(
     session: Session,
     topology_store=None,
     daap_memory=None,
+    rl_optimizer=None,
 ) -> Toolkit:
     """
     Build a Toolkit with ask_user scoped to this specific session.
@@ -500,6 +501,14 @@ def create_session_scoped_toolkit(
         ws_send = session._ws_send  # None in CLI, set by ws_handler for WebSocket
 
         try:
+            # RL: recommend configuration overrides (non-fatal)
+            if rl_optimizer is not None:
+                try:
+                    task_type = rl_optimizer.classify_task_type(user_prompt)
+                    topo_dict = rl_optimizer.recommend_overrides(topo_dict, task_type=task_type)
+                except Exception as _rl_exc:
+                    logger.warning("RL override failed (non-fatal): %s", _rl_exc)
+
             spec = TopologySpec.model_validate(topo_dict)
             resolved = resolve_topology(spec)
             if isinstance(resolved, list):
@@ -592,6 +601,13 @@ def create_session_scoped_toolkit(
                 "total_input_tokens": result.total_input_tokens,
                 "total_output_tokens": result.total_output_tokens,
             }
+
+            # RL: record outcome (non-fatal)
+            if rl_optimizer is not None:
+                try:
+                    rl_optimizer.record_outcome(topo_dict, result)
+                except Exception as _rl_exc:
+                    logger.warning("RL record_outcome failed (non-fatal): %s", _rl_exc)
 
             # Write run + agent learnings to memory (non-fatal)
             if daap_memory is not None and result.success:

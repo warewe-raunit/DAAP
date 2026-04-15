@@ -50,6 +50,7 @@ DEFAULT_OPERATOR_KEY_ENV = "OPENROUTER_API_KEY"
 
 # Memory — optional. Disabled gracefully if credentials are missing.
 _daap_memory = None
+_rl_optimizer = None
 
 
 @asynccontextmanager
@@ -91,6 +92,20 @@ def _get_memory():
         return _daap_memory
     except Exception as exc:
         logger.warning("Memory disabled: %s", exc)
+        return None
+
+
+def _get_optimizer():
+    """Lazy-init TopologyOptimizer. Returns None if setup fails."""
+    global _rl_optimizer
+    if _rl_optimizer is not None:
+        return _rl_optimizer
+    try:
+        from daap.rl.optimizer import TopologyOptimizer
+        _rl_optimizer = TopologyOptimizer()
+        return _rl_optimizer
+    except Exception as exc:
+        logger.warning("RL optimizer disabled: %s", exc)
         return None
 
 
@@ -211,6 +226,7 @@ async def create_session(
     # Load user context from memory (None for first-time users — graceful)
     user_context = None
     memory = _get_memory()
+    optimizer = _get_optimizer()
     if memory:
         try:
             from daap.memory.reader import load_user_context_for_master
@@ -219,7 +235,12 @@ async def create_session(
             logger.warning("Failed to load user context: %s", exc)
 
     session.token_tracker = TokenTracker()
-    toolkit = create_session_scoped_toolkit(session, topology_store=topology_store, daap_memory=memory)
+    toolkit = create_session_scoped_toolkit(
+        session,
+        topology_store=topology_store,
+        daap_memory=memory,
+        rl_optimizer=optimizer,
+    )
     session.master_agent = create_master_agent_with_toolkit(
         toolkit,
         user_context=user_context,
@@ -298,6 +319,14 @@ async def rate_run(req: RatingRequest):
         topology_json=session.pending_topology,
         execution_result=session.execution_result,
     )
+
+    optimizer = _get_optimizer()
+    if optimizer is not None:
+        try:
+            topology_id = (session.execution_result or {}).get("topology_id", "unknown")
+            optimizer.record_rating(topology_id, req.rating)
+        except Exception as exc:
+            logger.warning("RL record_rating failed (non-fatal): %s", exc)
 
     # Mem0 feedback (optional)
     memory = _get_memory()
