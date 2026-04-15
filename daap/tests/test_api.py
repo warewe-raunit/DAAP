@@ -17,8 +17,13 @@ from starlette.testclient import WebSocketTestSession
 
 from daap.api.routes import app
 from daap.api.sessions import Session, SessionManager, create_session_scoped_toolkit
+from daap.api.topology_routes import (
+    set_session_manager as set_topology_session_manager,
+    set_store as set_topology_store,
+)
 import daap.api.routes as routes_module
 from daap.feedback.store import FeedbackStore
+from daap.topology.store import TopologyStore
 
 
 # ---------------------------------------------------------------------------
@@ -37,6 +42,9 @@ def reset_globals(tmp_path):
     """Fresh SessionManager and FeedbackStore (temp DB) per test."""
     routes_module.session_manager = SessionManager()
     routes_module.feedback_store = FeedbackStore(db_path=str(tmp_path / "test.db"))
+    routes_module.topology_store = TopologyStore(db_path=str(tmp_path / "topology.db"))
+    set_topology_store(routes_module.topology_store)
+    set_topology_session_manager(routes_module.session_manager)
     yield
 
 

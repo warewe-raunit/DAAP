@@ -1,5 +1,5 @@
 """DAAP Topology Persistence Models — dataclasses for stored topologies and runs."""
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 
 @dataclass

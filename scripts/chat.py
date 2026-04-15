@@ -5,7 +5,6 @@ Usage:
   python scripts/chat.py
 
 Commands during chat:
-  approve       — approve the pending topology and execute it
   cheaper       — ask agent to make topology cheaper
   cancel        — cancel pending topology
   quit / exit   — end session
@@ -36,9 +35,6 @@ from agentscope.message import Msg
 from daap.api.sessions import Session, SessionManager, create_session_scoped_toolkit
 from daap.master.agent import create_master_agent_with_toolkit
 from daap.master.tools import clear_last_topology_result, get_last_topology_result
-from daap.spec.schema import TopologySpec
-from daap.spec.resolver import resolve_topology
-from daap.executor.engine import execute_topology
 from daap.topology.store import TopologyStore
 from daap.tools.token_tracker import TokenTracker
 
@@ -219,110 +215,11 @@ async def main():
 
         cmd = user_input.lower().strip().lstrip("/")
 
-        # Fuzzy approve detection — catches typos and natural language
-        _approve_triggers = (
-            "approve", "approv", "yes run", "yes execute", "execute it",
-            "run it", "go ahead", "proceed", "i approve", "looks good",
-            "let's go", "lets go", "do it", "start execution", "run the topology",
-        )
-        _is_approve = any(t in cmd for t in _approve_triggers)
-
         # ------------------------------------------------------------------
         # Built-in commands
         if cmd in ("quit", "exit", "bye"):
             print("Bye!")
             break
-
-        if _is_approve:
-            if session.pending_topology is None:
-                _print_warn("No topology pending. Ask me to build one first.")
-                continue
-
-            topo_id = session.pending_topology.get("topology_id", "?")
-            user_prompt = session.pending_topology.get("user_prompt", "")
-            _print_system(f"Executing topology {topo_id}...")
-
-            try:
-                topology_spec = TopologySpec.model_validate(session.pending_topology)
-                resolved = resolve_topology(topology_spec)
-                if isinstance(resolved, list):
-                    errors = "; ".join(e.message for e in resolved)
-                    _print_error(f"Resolution failed: {errors}")
-                    continue
-
-                total_steps = len(resolved.execution_order)
-
-                def _on_node_start(node_id, model_id, step_num, total):
-                    print(f"{DIM}[{step_num}/{total}] Running {BOLD}{node_id}{RESET}{DIM} ({model_id})...{RESET}", flush=True)
-
-                def _on_node_complete(nr):
-                    tok = nr.input_tokens + nr.output_tokens
-                    print(f"{GREEN}[done] {nr.node_id} — {nr.latency_seconds:.1f}s | {tok} tokens{RESET}", flush=True)
-
-                result = await execute_topology(
-                    resolved=resolved,
-                    user_prompt=user_prompt,
-                    tracker=session.token_tracker,
-                    on_node_start=_on_node_start,
-                    on_node_complete=_on_node_complete,
-                )
-
-                session.pending_topology = None
-                session.pending_estimate = None
-
-                # Auto-save topology + run history (non-fatal on storage errors).
-                try:
-                    saved = topology_store.save_topology(
-                        spec=topology_spec.model_dump(),
-                        user_id=session.user_id,
-                        overwrite=True,
-                    )
-                    topology_store.save_run(
-                        topology_id=saved.topology_id,
-                        topology_version=saved.version,
-                        user_id=session.user_id,
-                        result={
-                            "topology_id": result.topology_id,
-                            "final_output": result.final_output,
-                            "success": result.success,
-                            "error": result.error,
-                            "latency_seconds": result.total_latency_seconds,
-                            "total_input_tokens": result.total_input_tokens,
-                            "total_output_tokens": result.total_output_tokens,
-                        },
-                        user_prompt=user_prompt,
-                    )
-                except Exception as _save_exc:
-                    _print_warn(f"Auto-save failed (run still completed): {_save_exc}")
-
-                if result.success:
-                    # Inject result into conversation so agent can discuss it
-                    summary = (
-                        f"[Execution complete]\n"
-                        f"Topology ran successfully in {result.total_latency_seconds:.1f}s.\n"
-                        f"Nodes: {', '.join(nr.node_id for nr in result.node_results)}\n"
-                        f"Tokens used: {result.total_input_tokens} in / {result.total_output_tokens} out\n"
-                        f"Final output:\n{result.final_output}"
-                    )
-                    session.conversation.append({"role": "user", "content": summary})
-                    session.conversation.append({"role": "assistant", "content": "Execution complete. Here are the results above."})
-
-                if result.success:
-                    _print_result(
-                        result.final_output,
-                        result.total_latency_seconds,
-                        result.models_used,
-                        {
-                            "input_tokens": result.total_input_tokens,
-                            "output_tokens": result.total_output_tokens,
-                            "total_tokens": result.total_input_tokens + result.total_output_tokens,
-                        },
-                    )
-                else:
-                    _print_error(f"Execution failed: {result.error}")
-            except Exception as exc:
-                _print_error(f"Error: {exc}")
-            continue
 
         if cmd == "cheaper":
             user_input = "Make the topology cheaper. Reduce cost while keeping it functional."

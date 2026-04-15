@@ -16,23 +16,59 @@ WebSocket:
 """
 
 import logging
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from daap.api.sessions import SessionManager, create_session_scoped_toolkit
+from daap.api.topology_routes import (
+    router as topology_router,
+    set_session_manager as set_topology_session_manager,
+    set_store as set_topology_store,
+)
 from daap.api.ws_handler import handle_websocket
 from daap.feedback.store import FeedbackStore
 from daap.master.agent import create_master_agent_with_toolkit
+from daap.topology.store import TopologyStore
 from daap.tools.token_tracker import TokenTracker
 
 logger = logging.getLogger(__name__)
+
+# Global singletons
+session_manager = SessionManager()
+feedback_store = FeedbackStore()
+topology_store = TopologyStore()
+
+set_topology_store(topology_store)
+set_topology_session_manager(session_manager)
+
+OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+DEFAULT_OPERATOR_PROVIDER = "openrouter"
+DEFAULT_OPERATOR_KEY_ENV = "OPENROUTER_API_KEY"
+
+# Memory — optional. Disabled gracefully if credentials are missing.
+_daap_memory = None
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup: purge expired, soft-deleted topologies.
+    try:
+        purged = topology_store.purge_expired()
+        if purged:
+            logger.info("Startup: purged %d expired topologies", purged)
+    except Exception as exc:
+        logger.warning("Startup purge failed (non-fatal): %s", exc)
+    yield
+
 
 app = FastAPI(
     title="DAAP API",
     description="Dynamic Agent Architecture Protocol — API Layer",
     version="0.1.0",
+    lifespan=lifespan,
 )
 
 app.add_middleware(
@@ -42,16 +78,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Global singletons
-session_manager = SessionManager()
-feedback_store = FeedbackStore()
-
-OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
-DEFAULT_OPERATOR_PROVIDER = "openrouter"
-DEFAULT_OPERATOR_KEY_ENV = "OPENROUTER_API_KEY"
-
-# Memory — optional. Disabled gracefully if credentials are missing.
-_daap_memory = None
+app.include_router(topology_router)
 
 def _get_memory():
     """Lazy-init DaapMemory. Returns None if setup fails."""
@@ -196,7 +223,7 @@ async def create_session(
             logger.warning("Failed to load user context: %s", exc)
 
     session.token_tracker = TokenTracker()
-    toolkit = create_session_scoped_toolkit(session)
+    toolkit = create_session_scoped_toolkit(session, topology_store=topology_store)
     session.master_agent = create_master_agent_with_toolkit(
         toolkit,
         user_context=user_context,
@@ -320,4 +347,9 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
         await websocket.close(code=4005, reason="Session not initialised")
         return
 
-    await handle_websocket(websocket, session, daap_memory=_get_memory())
+    await handle_websocket(
+        websocket,
+        session,
+        daap_memory=_get_memory(),
+        topology_store=topology_store,
+    )
