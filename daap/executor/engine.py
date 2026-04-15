@@ -60,6 +60,7 @@ async def execute_topology(
     tracker: TokenTracker | None = None,
     on_node_start: object | None = None,     # callable(node_id, model_id, step_num, total_steps)
     on_node_complete: object | None = None,  # callable(NodeResult)
+    daap_memory=None,                        # optional DaapMemory for node prompt enrichment
 ) -> ExecutionResult:
     """
     Execute a fully resolved topology end-to-end.
@@ -83,10 +84,10 @@ async def execute_topology(
         # Per-execution tracker — creates fresh one if caller didn't supply
         exec_tracker = tracker or TokenTracker()
 
-        # 1. Build all nodes
+        # 1. Build all nodes (optionally enriches system prompts via agent diary)
         built_nodes: dict[str, BuiltNode] = {}
         for rnode in resolved.nodes:
-            built = await build_node(rnode, tool_registry, tracker=exec_tracker)
+            built = await build_node(rnode, tool_registry, daap_memory=daap_memory, tracker=exec_tracker)
             built_nodes[rnode.node_id] = built
 
         # 2. Map node_id → output data_key (first declared output)

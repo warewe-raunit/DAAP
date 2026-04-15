@@ -154,28 +154,24 @@ async def health():
 @app.get("/models")
 async def list_models():
     """Return available model presets and how to select them via POST /session."""
+    from daap.spec.resolver import MODEL_REGISTRY
     return {
         "provider": "openrouter",
         "presets": {
             "master_agent": {
-                "default": "google/gemini-2.0-flash-001",
+                "default": MODEL_REGISTRY["powerful"],
                 "options": [
-                    {"id": "google/gemini-2.0-flash-001",          "cost": "$$0.10/$0.40 per 1M",  "note": "default — fast + cheap"},
-                    {"id": "google/gemini-flash-1.5",              "cost": "$0.075/$0.30 per 1M", "note": "cheaper Gemini"},
-                    {"id": "openrouter/free",                      "cost": "$0",                  "note": "free, random model"},
-                    {"id": "openai/gpt-4o-mini",                   "cost": "$0.15/$0.60 per 1M",  "note": "OpenAI cheap"},
-                    {"id": "qwen/qwen3.5-plus-02-15",             "cost": "$0.26/$1.56 per 1M",  "note": "big context"},
-                    {"id": "anthropic/claude-sonnet-4-6",          "cost": "$3/$15 per 1M",       "note": "high quality"},
-                    {"id": "anthropic/claude-opus-4-6",            "cost": "$15/$75 per 1M",      "note": "best quality"},
+                    {"id": "google/gemini-2.5-flash",      "cost": "$0.30/$2.50 per 1M", "note": "default — powerful tier, thinking mode"},
+                    {"id": "google/gemini-2.5-flash-lite", "cost": "$0.10/$0.40 per 1M", "note": "fast tier, cheapest"},
+                    {"id": "deepseek/deepseek-v3.2",       "cost": "$0.26/$0.38 per 1M", "note": "smart tier, GPT-5 class"},
+                    {"id": "openai/gpt-4o-mini",           "cost": "$0.15/$0.60 per 1M", "note": "OpenAI cheap option"},
+                    {"id": "anthropic/claude-sonnet-4-6",  "cost": "$3/$15 per 1M",      "note": "high quality"},
+                    {"id": "anthropic/claude-opus-4-6",    "cost": "$15/$75 per 1M",     "note": "best quality"},
                 ],
             },
             "subagents": {
                 "tiers": ["fast", "smart", "powerful"],
-                "defaults": {
-                    "fast":     "google/gemini-2.0-flash-001",
-                    "smart":    "google/gemini-2.0-flash-001",
-                    "powerful": "google/gemini-2.0-flash-001",
-                },
+                "defaults": MODEL_REGISTRY,
             },
         },
         "usage": {
@@ -223,7 +219,7 @@ async def create_session(
             logger.warning("Failed to load user context: %s", exc)
 
     session.token_tracker = TokenTracker()
-    toolkit = create_session_scoped_toolkit(session, topology_store=topology_store)
+    toolkit = create_session_scoped_toolkit(session, topology_store=topology_store, daap_memory=memory)
     session.master_agent = create_master_agent_with_toolkit(
         toolkit,
         user_context=user_context,

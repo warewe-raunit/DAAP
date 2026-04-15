@@ -10,35 +10,7 @@ Zero external dependencies — no LLM calls, no network.
 
 from dataclasses import dataclass, field
 
-from daap.spec.resolver import ResolvedTopology, ResolvedNode
-
-
-# ---------------------------------------------------------------------------
-# Pricing — per 1M tokens (TODO: verify current pricing from provider docs)
-# ---------------------------------------------------------------------------
-
-MODEL_PRICING: dict[str, dict[str, float]] = {
-    # Anthropic (via OpenRouter)
-    "claude-haiku-4-5-20251001":            {"input_per_1m": 1.00,  "output_per_1m": 5.00},
-    "anthropic/claude-haiku-4-5-20251001":  {"input_per_1m": 1.00,  "output_per_1m": 5.00},
-    "claude-sonnet-4-6":                    {"input_per_1m": 3.00,  "output_per_1m": 15.00},
-    "anthropic/claude-sonnet-4-6":          {"input_per_1m": 3.00,  "output_per_1m": 15.00},
-    "claude-opus-4-6":                      {"input_per_1m": 15.00, "output_per_1m": 75.00},
-    "anthropic/claude-opus-4-6":            {"input_per_1m": 15.00, "output_per_1m": 75.00},
-    # Google Gemini (via OpenRouter)
-    "google/gemini-2.0-flash-001":          {"input_per_1m": 0.10,  "output_per_1m": 0.40},
-    "google/gemini-flash-1.5":              {"input_per_1m": 0.075, "output_per_1m": 0.30},
-    # OpenAI (via OpenRouter)
-    "openai/gpt-4o":                        {"input_per_1m": 2.50,  "output_per_1m": 10.00},
-    "openai/gpt-4o-mini":                   {"input_per_1m": 0.15,  "output_per_1m": 0.60},
-    # Free router
-    "openrouter/free":                      {"input_per_1m": 0.00,  "output_per_1m": 0.00},
-    # Qwen
-    "qwen/qwen3.5-plus-02-15":             {"input_per_1m": 0.26,  "output_per_1m": 1.56},
-}
-
-# Fallback pricing when model not in registry
-_FALLBACK_PRICING = {"input_per_1m": 0.10, "output_per_1m": 0.40}
+from daap.spec.resolver import ResolvedTopology, ResolvedNode, get_model_pricing, MODEL_REGISTRY
 
 
 # ---------------------------------------------------------------------------
@@ -57,6 +29,13 @@ ROLE_HEURISTICS: dict[str, dict[str, int]] = {
 
 AVG_LATENCY_PER_API_CALL_SECONDS: float = 3.0
 AVG_LATENCY_PER_TOOL_CALL_SECONDS: float = 2.0
+
+# Per-model latency heuristics (seconds per LLM call)
+MODEL_LATENCY_SECONDS: dict[str, float] = {
+    "google/gemini-2.5-flash-lite": 1.5,
+    "deepseek/deepseek-v3.2":       3.0,
+    "google/gemini-2.5-flash":      2.5,
+}
 
 RISK_ORDER = {"free": 0, "low": 1, "high": 2, "destructive": 3}
 
@@ -125,7 +104,7 @@ def _get_heuristics(role: str) -> dict[str, int]:
 
 
 def _get_pricing(model_id: str) -> dict[str, float]:
-    return MODEL_PRICING.get(model_id, _FALLBACK_PRICING)
+    return get_model_pricing(model_id)
 
 
 def _estimate_node(node: ResolvedNode) -> NodeEstimate:
@@ -150,7 +129,7 @@ def _estimate_node(node: ResolvedNode) -> NodeEstimate:
     total_cost = cost_per_instance * node.parallel_instances
 
     # Latency: parallel instances run concurrently = single instance time
-    latency = AVG_LATENCY_PER_API_CALL_SECONDS
+    latency = MODEL_LATENCY_SECONDS.get(node.concrete_model_id, AVG_LATENCY_PER_API_CALL_SECONDS)
     if node.agent_mode == "react":
         latency += tool_calls * AVG_LATENCY_PER_TOOL_CALL_SECONDS
 
@@ -191,7 +170,7 @@ def _build_user_summary(resolved: ResolvedTopology, node_estimates: list[NodeEst
 
 def _min_viable_cost(resolved: ResolvedTopology) -> float:
     """Floor estimate: every node on fast/single/1-instance."""
-    fast_pricing = _get_pricing("claude-haiku-4-5-20251001")
+    fast_pricing = _get_pricing(MODEL_REGISTRY["fast"])
     total = 0.0
     for node in resolved.nodes:
         h = _get_heuristics(node.role)
@@ -253,14 +232,14 @@ def _generate_cost_suggestions(
             ))
 
         # LOW: powerful tier for non-planning role → suggest smart
-        if node.concrete_model_id == MODEL_PRICING.get("claude-opus-4-6") or "opus" in node.concrete_model_id:
+        if node.concrete_model_id == MODEL_REGISTRY["powerful"]:
             planning_keywords = ["master", "planner", "orchestrat", "architect"]
             is_planning = any(kw in node.role.lower() for kw in planning_keywords)
             if not is_planning:
-                opus_pricing = _get_pricing(node.concrete_model_id)
-                sonnet_pricing = _get_pricing("claude-sonnet-4-6")
+                powerful_pricing = _get_pricing(node.concrete_model_id)
+                smart_pricing = _get_pricing(MODEL_REGISTRY["smart"])
                 savings = est.estimated_cost_usd * (
-                    1 - sonnet_pricing["input_per_1m"] / opus_pricing["input_per_1m"]
+                    1 - smart_pricing["input_per_1m"] / powerful_pricing["input_per_1m"]
                 )
                 suggestions.append(CostSuggestion(
                     description=f"Downgrade '{node.node_id}' from powerful to smart model tier",
@@ -271,7 +250,7 @@ def _generate_cost_suggestions(
                 ))
 
         # HIGH: smart tier for evaluator/reasoning → suggest fast
-        if "sonnet" in node.concrete_model_id or "smart" in node.concrete_model_id:
+        if node.concrete_model_id == MODEL_REGISTRY["smart"]:
             evaluation_keywords = ["evaluat", "scor", "rank", "classif", "filter"]
             is_evaluator = any(kw in node.role.lower() for kw in evaluation_keywords)
             if is_evaluator:

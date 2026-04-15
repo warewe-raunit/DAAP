@@ -91,10 +91,13 @@ Do not call `generate_topology` for simple one-shot tasks.
 Available tools for agents: {tools_list}
 MCP tools use the format: `mcp://service_name` (example: `mcp://linkedin`).
 
-Model tiers (default to fast unless deeper reasoning is needed):
-- "fast": search, extract, format
-- "smart": evaluate, score, synthesize, write quality output
-- "powerful": complex planning or difficult reasoning (rare)
+Model tiers — pick the right tier per node (cost shown per 1M tokens):
+- "fast":     Gemini 2.5 Flash Lite ($0.10 in / $0.40 out) — search, extract, format, tool-heavy nodes
+- "smart":    DeepSeek V3.2 ($0.26 in / $0.38 out) — evaluate, score, rank, write quality output, analysis
+- "powerful": Gemini 2.5 Flash ($0.30 in / $2.50 out) — complex synthesis, multi-source reasoning (use sparingly)
+
+Cost rules: default "fast" for tool nodes; "smart" for judgment/writing; "powerful" only when "smart" is insufficient.
+A 4-node all-fast topology costs ~$0.002. All-smart ~$0.005. Keep parallel_instances low (2-4 max).
 
 Agent modes:
 - "react": iterative tool loop for research/exploration. Typical `max_react_iterations`: 3-5 simple, 8-10 deep.

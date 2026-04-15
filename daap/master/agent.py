@@ -27,7 +27,7 @@ from daap.master.tools import (
 from daap.tools.registry import get_available_tool_names
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
-OPENROUTER_SMART_MODEL = "google/gemini-2.0-flash-001"
+OPENROUTER_MASTER_MODEL = "google/gemini-2.5-flash"  # powerful tier — thinking mode, strong topology generation
 
 
 # ---------------------------------------------------------------------------
@@ -69,7 +69,7 @@ def _build_model_and_formatter(
         base_url = operator_config.get("base_url")
         api_key_env = operator_config.get("api_key_env", "OPENROUTER_API_KEY")
         model_id = operator_config.get("model_map", {}).get(
-            "smart", OPENROUTER_SMART_MODEL
+            "smart", OPENROUTER_MASTER_MODEL
         )
 
         base_url = base_url or OPENROUTER_BASE_URL
@@ -80,7 +80,7 @@ def _build_model_and_formatter(
     else:
         # Default: OpenRouter
         api_key_env = "OPENROUTER_API_KEY"
-        model_id = OPENROUTER_SMART_MODEL
+        model_id = OPENROUTER_MASTER_MODEL
         client_args = {"base_url": OPENROUTER_BASE_URL}
 
     model = TrackedOpenAIChatModel(

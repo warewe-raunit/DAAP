@@ -8,6 +8,7 @@ bug from Section 4's module-level state.
 
 import asyncio
 import json
+import logging
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -16,6 +17,8 @@ from agentscope.message import TextBlock
 from agentscope.tool import Toolkit, ToolResponse
 
 from daap.master.tools import generate_topology as generate_topology_tool
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -103,6 +106,7 @@ class SessionManager:
 def create_session_scoped_toolkit(
     session: Session,
     topology_store=None,
+    daap_memory=None,
 ) -> Toolkit:
     """
     Build a Toolkit with ask_user scoped to this specific session.
@@ -576,6 +580,7 @@ def create_session_scoped_toolkit(
                 tracker=session.token_tracker,
                 on_node_start=_on_node_start,
                 on_node_complete=_on_node_complete,
+                daap_memory=daap_memory,
             )
 
             session.execution_result = {
@@ -587,6 +592,28 @@ def create_session_scoped_toolkit(
                 "total_input_tokens": result.total_input_tokens,
                 "total_output_tokens": result.total_output_tokens,
             }
+
+            # Write run + agent learnings to memory (non-fatal)
+            if daap_memory is not None and result.success:
+                try:
+                    from daap.memory.writer import (
+                        write_run_to_memory,
+                        write_agent_learnings_from_run,
+                    )
+                    write_run_to_memory(
+                        memory=daap_memory,
+                        user_id=session.user_id,
+                        topology_summary=user_prompt,
+                        execution_result=result,
+                    )
+                    topology_nodes = topo_dict.get("nodes", [])
+                    write_agent_learnings_from_run(
+                        memory=daap_memory,
+                        execution_result=result,
+                        topology_nodes=topology_nodes,
+                    )
+                except Exception as _mem_exc:
+                    logger.warning("Memory write failed (non-fatal): %s", _mem_exc)
 
             # Auto-save topology + run
             if topology_store is not None:

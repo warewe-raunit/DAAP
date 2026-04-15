@@ -5,7 +5,6 @@ Called after runs complete and when users provide ratings/feedback.
 Constructs natural language summaries that Mem0 extracts facts from.
 """
 
-from daap.executor.engine import ExecutionResult
 from daap.memory.client import DaapMemory
 
 
@@ -13,7 +12,7 @@ def write_run_to_memory(
     memory: DaapMemory,
     user_id: str,
     topology_summary: str,
-    execution_result: ExecutionResult,
+    execution_result,  # ExecutionResult — imported lazily to avoid agentscope at module level
     user_rating: int | None = None,
     user_comment: str = "",
 ) -> None:
@@ -57,7 +56,7 @@ def write_user_feedback(
 
 def write_agent_learnings_from_run(
     memory: DaapMemory,
-    execution_result: ExecutionResult,
+    execution_result,  # ExecutionResult — imported lazily to avoid agentscope at module level
     topology_nodes: list[dict],
 ) -> None:
     """

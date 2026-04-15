@@ -191,7 +191,7 @@ def test_rerun_topology_success(client, seeded_store):
         total_latency_seconds=1.5,
         total_input_tokens=11,
         total_output_tokens=22,
-        models_used=["google/gemini-2.0-flash-001"],
+        models_used=["google/gemini-2.5-flash-lite"],
     )
 
     with (

@@ -18,11 +18,35 @@ from daap.spec.schema import TopologySpec, NodeSpec
 # Registries
 # ---------------------------------------------------------------------------
 
+# Model tier → concrete OpenRouter model ID
+# Updated: April 2026
+# Gemini 2.0 Flash deprecated (shutdown June 1 2026) — migrated to newer models
 MODEL_REGISTRY: dict[str, str] = {
-    "fast": "google/gemini-2.0-flash-001",
-    "smart": "google/gemini-2.0-flash-001",
-    "powerful": "google/gemini-2.0-flash-001",
+    "fast":     "google/gemini-2.5-flash-lite",   # search, extract, format — cheapest viable
+    "smart":    "deepseek/deepseek-v3.2",          # evaluate, score, write — GPT-5 class @ 1/50th cost
+    "powerful": "google/gemini-2.5-flash",         # master agent, complex planning — thinking mode
 }
+
+# Pricing per 1M tokens (USD) — used by estimator.py
+# Source: OpenRouter posted rates, April 2026
+MODEL_PRICING: dict[str, dict[str, float]] = {
+    # Active tier models
+    "google/gemini-2.5-flash-lite": {"input_per_1m": 0.10,  "output_per_1m": 0.40},
+    "deepseek/deepseek-v3.2":       {"input_per_1m": 0.26,  "output_per_1m": 0.38},
+    "google/gemini-2.5-flash":      {"input_per_1m": 0.30,  "output_per_1m": 2.50},
+    # Upgrade options (operator_config overrides / future use)
+    "google/gemini-3-flash-preview": {"input_per_1m": 0.50, "output_per_1m": 3.00},
+    # Legacy — backward compat with saved topologies
+    "google/gemini-2.0-flash-001":  {"input_per_1m": 0.10,  "output_per_1m": 0.40},
+}
+
+# Conservative fallback for unknown models
+DEFAULT_PRICING: dict[str, float] = {"input_per_1m": 1.00, "output_per_1m": 5.00}
+
+
+def get_model_pricing(model_id: str) -> dict[str, float]:
+    """Return pricing for a model ID. Falls back to DEFAULT_PRICING if unknown."""
+    return MODEL_PRICING.get(model_id, DEFAULT_PRICING)
 
 # Phase 1: tool names resolve to string identifiers.
 # Phase 3: becomes a registry of actual tool instances.

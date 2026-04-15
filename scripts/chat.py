@@ -193,12 +193,30 @@ async def main():
     session = session_mgr.create_session()
     topology_store = TopologyStore()
     session.token_tracker = TokenTracker()
-    toolkit = create_session_scoped_toolkit(session, topology_store=topology_store)
+
+    # Optional memory — disabled gracefully if credentials missing
+    daap_memory = None
+    user_context = None
+    try:
+        from daap.memory.client import DaapMemory
+        from daap.memory.reader import load_user_context_for_master
+        daap_memory = DaapMemory(mode="ephemeral")
+        user_context = load_user_context_for_master(daap_memory, session.user_id)
+    except Exception:
+        pass  # memory is optional — never block startup
+
+    toolkit = create_session_scoped_toolkit(
+        session,
+        topology_store=topology_store,
+        daap_memory=daap_memory,
+    )
     session.master_agent = create_master_agent_with_toolkit(
         toolkit,
+        user_context=user_context,
         tracker=session.token_tracker,
     )
-    _print_system(f"Session {session.session_id} ready | Model: google/gemini-2.0-flash-001")
+    from daap.spec.resolver import MODEL_REGISTRY
+    _print_system(f"Session {session.session_id} ready | Master: {MODEL_REGISTRY['powerful']}")
 
     while True:
         # Get user input

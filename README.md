@@ -33,7 +33,7 @@ Execution Engine
 - **REST API** — 11 endpoints under `/api/v1/topologies/`
 - **WebSocket streaming** — real-time `node_start` / `node_complete` / `result` events
 - **Feedback store** — SQLite run outcome logging
-- **Memory** — mem0ai integration (optional, Phase 2)
+- **Per-user memory** — mem0ai: loads user profile + preferences at session start, enriches node prompts with agent learnings, writes run outcomes post-execution (optional credentials, fails gracefully)
 
 ---
 
@@ -42,10 +42,10 @@ Execution Engine
 | Layer | Technology |
 |---|---|
 | Agent framework | AgentScope (`ReActAgent`, `Toolkit`, `InMemoryMemory`) |
-| LLM routing | OpenRouter — default `google/gemini-2.0-flash-001` |
+| LLM routing | OpenRouter — 3 tiers: Gemini 2.5 Flash / DeepSeek V3.2 / Gemini 2.5 Flash Lite |
 | API | FastAPI + uvicorn (port 8000) |
 | Persistence | SQLite (topology store + feedback store) |
-| Memory | mem0ai (optional) |
+| Memory | mem0ai — per-user context + agent learnings (active, optional credentials) |
 | Python | 3.11+ |
 
 ---
@@ -108,11 +108,13 @@ scripts/
 
 ## Model tiers
 
-| Tier | Use case |
-|---|---|
-| `fast` | search, extract, format |
-| `smart` | evaluate, score, write |
-| `powerful` | complex planning (rare) |
+| Tier | Model | Cost (in/out per 1M) | Use case |
+|---|---|---|---|
+| `fast` | `google/gemini-2.5-flash-lite` | $0.10 / $0.40 | search, extract, format |
+| `smart` | `deepseek/deepseek-v3.2` | $0.26 / $0.38 | evaluate, score, write |
+| `powerful` | `google/gemini-2.5-flash` | $0.30 / $2.50 | complex planning, master agent |
+
+Override any tier per session via `POST /session?subagent_fast_model=...`
 
 ---
 
@@ -124,10 +126,19 @@ pytest daap/tests/
 
 ---
 
-## Roadmap (Phase 2)
+## Phase 2 status
+
+| Item | Status |
+|---|---|
+| Model tier migration (Gemini 2.0 → 2.5 Flash / DeepSeek / Flash Lite) | Done |
+| Agent-driven approval (removed keyword detection) | Done |
+| Per-user memory — context load + node enrichment + post-run writes | Done |
+| Topology persistence — save, version, rerun, soft-delete | Done |
+
+## Roadmap (Phase 3)
 
 - MCP tools: LinkedIn, Crunchbase
 - Redis session store
-- Per-user persistent memory
 - RL-based instance tuning
 - JWT auth
+- Smarter retry + partial results
