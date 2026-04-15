@@ -40,8 +40,35 @@ class TopologyOptimizer:
         return self._experience_store
 
     def classify_task_type(self, user_prompt: str) -> str:
-        prompt = (user_prompt or "").lower()
+        """
+        Classify user_prompt into a task_type string.
 
+        When DAAP_RL_USE_EMBEDDINGS=1: uses cosine similarity to pre-computed
+        centroids via free/cheap OpenRouter embedding models. Falls through to
+        keyword classification on any failure.
+
+        Keyword classification (always available, zero cost):
+        lead_generation | email_outreach | qualification | research |
+        content | data_processing | general
+        """
+        import os
+        if os.environ.get("DAAP_RL_USE_EMBEDDINGS") == "1":
+            try:
+                from daap.rl.embedder import get_centroid_classifier
+                classifier = get_centroid_classifier(self.db_path)
+                result = classifier.classify(user_prompt)
+                if result is not None:
+                    return result
+                logger.debug("Embedding classify returned None — falling back to keywords")
+            except Exception as exc:
+                logger.debug("Embedding classify failed (%s) — falling back to keywords", exc)
+
+        return self._classify_by_keywords(user_prompt)
+
+    @staticmethod
+    def _classify_by_keywords(user_prompt: str) -> str:
+        """Keyword-based task classification. Zero cost, always works."""
+        prompt = (user_prompt or "").lower()
         if any(token in prompt for token in ("email", "outreach", "subject line", "cold message", "follow-up")):
             return "email_outreach"
         if any(token in prompt for token in ("qualify", "qualification", "score lead", "ranking")):
