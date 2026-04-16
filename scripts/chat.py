@@ -41,6 +41,7 @@ except ImportError:
 
 from agentscope.message import Msg
 from daap.api.sessions import Session, SessionManager, create_session_scoped_toolkit
+from daap.identity import load_local_user, resolve_cli_user
 from daap.master.agent import create_master_agent_with_toolkit
 from daap.master.tools import clear_last_topology_result, get_last_topology_result
 from daap.topology.store import TopologyStore
@@ -84,7 +85,7 @@ def _print_header(raw_output: bool):
     mode = "RAW" if raw_output else "CLEAN"
     print(f"\n{BOLD}DAAP CLI{RESET} {DIM}[{mode} mode]{RESET}")
     print(f"{DIM}{'-' * min(_terminal_width(), 100)}{RESET}")
-    print(f"{DIM}Commands: /help /approve /cheaper /cancel /raw /clean /quit{RESET}\n")
+    print(f"{DIM}Commands: /help /approve /cheaper /cancel /mcp /skills /profile /raw /clean /quit{RESET}\n")
 
 
 def _print_wrapped(text: str, indent: int = 2):
@@ -388,6 +389,41 @@ async def _run_agent_turn(session: Session) -> tuple[str, dict]:
 
 
 # ---------------------------------------------------------------------------
+# Identity helpers
+# ---------------------------------------------------------------------------
+
+def _build_welcome_line(user_id: str, topology_store) -> str:
+    """Assemble 'Welcome back, X — N runs · optimizer active · M memory facts'."""
+    display = user_id.replace("-", " ").title()
+    segments: list[str] = []
+
+    try:
+        run_count = topology_store.count_runs(user_id)
+        if run_count > 0:
+            segments.append(f"{run_count} run{'s' if run_count != 1 else ''}")
+    except Exception:
+        pass
+
+    try:
+        from daap.optimizer.store import BanditStore
+        summary = BanditStore().get_profile_summary(user_id)
+        segments.append("optimizer active" if summary else "optimizer learning")
+    except Exception:
+        pass
+
+    try:
+        from daap.memory.reader import load_user_profile
+        facts = load_user_profile(user_id)
+        if facts:
+            segments.append(f"{len(facts)} memory fact{'s' if len(facts) != 1 else ''}")
+    except Exception:
+        pass
+
+    suffix = " · ".join(segments)
+    return f"Welcome back, {display} — {suffix}" if suffix else f"Welcome back, {display}"
+
+
+# ---------------------------------------------------------------------------
 # Main chat loop
 # ---------------------------------------------------------------------------
 
@@ -399,27 +435,48 @@ async def main():
     if not os.environ.get("OPENROUTER_API_KEY", "").strip():
         _print_warn("OPENROUTER_API_KEY is not set. API requests will fail until you set it.")
 
+    # Resolve user identity (first-run prompt or load saved)
+    is_new_user = load_local_user() is None
+    user_id = await asyncio.get_event_loop().run_in_executor(None, resolve_cli_user)
+
     # Init session
     session_mgr = SessionManager()
-    session = session_mgr.create_session()
     topology_store = TopologyStore()
+    session = session_mgr.create_session(user_id=user_id)
     session.token_tracker = TokenTracker()
+
+    if not is_new_user:
+        _print_system(_build_welcome_line(user_id, topology_store))
+
+    # MCP servers — start all configured, non-blocking on failure
+    mcp_manager = None
+    try:
+        from daap.mcpx.manager import get_mcp_manager
+        mcp_manager = get_mcp_manager()
+        await mcp_manager.start_all()
+        connected = mcp_manager.list_connected()
+        if connected:
+            _print_system(f"MCP servers: {', '.join(connected)}")
+    except Exception:
+        pass  # MCP is optional
 
     # Optional memory — disabled gracefully if credentials missing
     daap_memory = None
     user_context = None
     try:
-        from daap.memory.client import DaapMemory
-        from daap.memory.reader import load_user_context_for_master
-        daap_memory = DaapMemory(mode="ephemeral")
-        user_context = load_user_context_for_master(daap_memory, session.user_id)
+        from daap.memory.palace import DaapMemory
+        daap_memory = DaapMemory()
+        if daap_memory.available:
+            user_context = daap_memory.format_for_master_prompt(session.user_id, "")
+        else:
+            daap_memory = None
     except Exception:
         pass  # memory is optional — never block startup
 
     rl_optimizer = None
     try:
-        from daap.rl.optimizer import TopologyOptimizer
-        rl_optimizer = TopologyOptimizer()
+        from daap.optimizer.integration import get_tier_recommendations  # noqa: F401
+        rl_optimizer = True  # sentinel: LinTS optimizer available
     except Exception:
         pass
 
@@ -460,7 +517,7 @@ async def main():
                 break
 
             if cmd == "help":
-                _print_system("Commands: /help /approve /cheaper /cancel /raw /clean /quit")
+                _print_system("Commands: /help /approve /cheaper /cancel /mcp /skills /profile /raw /clean /quit")
                 continue
 
             if cmd == "raw":
@@ -483,6 +540,75 @@ async def main():
                 session.pending_topology = None
                 session.pending_estimate = None
                 _print_system("Topology cancelled.")
+                continue
+
+            if cmd == "mcp":
+                if mcp_manager:
+                    connected = mcp_manager.list_connected()
+                    tools = await mcp_manager.list_all_tools()
+                    _print_system(f"Connected MCP servers: {', '.join(connected) or 'none'}")
+                    _print_system(f"Available tools ({len(tools)} total):")
+                    for t in tools:
+                        desc = (t.get("description") or "").splitlines()[0][:60]
+                        print(f"  {t['name']}: {desc}")
+                else:
+                    _print_system("No MCP servers connected. Configure servers in ~/.daap/mcpx.json")
+                continue
+
+            if cmd == "skills":
+                try:
+                    from daap.skills.manager import get_skill_manager
+                    skill_manager = get_skill_manager()
+                    master_dirs = skill_manager.list_skill_dirs("master")
+                    sub_dirs = skill_manager.list_skill_dirs("subagent")
+                    all_dirs = sorted(set(master_dirs) | set(sub_dirs))
+                    if all_dirs:
+                        _print_system(f"Configured skills ({len(all_dirs)} total):")
+                        for d in all_dirs:
+                            targets = []
+                            if d in master_dirs:
+                                targets.append("master")
+                            if d in sub_dirs:
+                                targets.append("subagent")
+                            print(f"  {d}  [{', '.join(targets)}]")
+                    else:
+                        _print_system("No skills configured. Add skill directories to ~/.daap/skills.json")
+                except Exception as exc:
+                    _print_system(f"Skills unavailable: {exc}")
+                continue
+
+            if cmd == "profile":
+                display = user_id.replace("-", " ").title()
+                _print_system(f"User: {display} ({user_id})")
+                try:
+                    run_count = topology_store.count_runs(user_id)
+                    _print_system(f"Runs: {run_count}")
+                except Exception:
+                    _print_system("Runs: unavailable")
+                try:
+                    from daap.optimizer.store import BanditStore
+                    summary = BanditStore().get_profile_summary(user_id)
+                    if summary:
+                        _print_system("Optimizer:")
+                        for entry in summary:
+                            print(f"  {entry['role']:<16} -> {entry['best_arm']}  ({entry['n_pulls']} obs)")
+                    else:
+                        _print_system("Optimizer: learning (no runs yet)")
+                except Exception:
+                    _print_system("Optimizer: unavailable")
+                try:
+                    from daap.memory.reader import load_user_profile
+                    facts = load_user_profile(user_id)
+                    if facts:
+                        _print_system(f"Memory ({len(facts)} facts):")
+                        for f in facts[:3]:
+                            print(f"  - {f}")
+                        if len(facts) > 3:
+                            print(f"  [+ {len(facts) - 3} more]")
+                    else:
+                        _print_system("Memory: no facts stored yet")
+                except Exception:
+                    _print_system("Memory: unavailable")
                 continue
 
             # ------------------------------------------------------------------
@@ -515,6 +641,11 @@ async def main():
                 _print_usage(usage)
     finally:
         _close_memory_client(daap_memory)
+        if mcp_manager:
+            try:
+                await mcp_manager.stop_all()
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":

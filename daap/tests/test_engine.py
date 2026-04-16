@@ -82,7 +82,7 @@ def patch_build_node(responses: dict[str, str]):
     Patch build_node to return MockAgents keyed by node_id.
     responses: {node_id: response_text}
     """
-    async def _mock_build(resolved_node, tool_registry, daap_memory=None, tracker=None):
+    async def _mock_build(resolved_node, tool_registry, daap_memory=None, tracker=None, user_id=None):
         resp = responses.get(resolved_node.node_id, "mock output")
         return make_built_node(resolved_node.node_id, resp,
                                resolved_node.parallel_instances)
@@ -157,7 +157,7 @@ async def test_execute_parallel_topology():
 async def test_node_failure_returns_error():
     resolved = load_resolved("parallel_branches_topology.json")
 
-    async def _failing_build(resolved_node, tool_registry, daap_memory=None, tracker=None):
+    async def _failing_build(resolved_node, tool_registry, daap_memory=None, tracker=None, user_id=None):
         if resolved_node.node_id == "researcher_a":
             node = BuiltNode(
                 node_id=resolved_node.node_id,
@@ -187,7 +187,7 @@ async def test_retry_on_failure():
     resolved = load_resolved("parallel_branches_topology.json")
     fail_once = FailOnceAgent("input_parser")
 
-    async def _build_with_fail_once(resolved_node, tool_registry, daap_memory=None, tracker=None):
+    async def _build_with_fail_once(resolved_node, tool_registry, daap_memory=None, tracker=None, user_id=None):
         if resolved_node.node_id == "input_parser":
             return BuiltNode(
                 node_id="input_parser",
@@ -237,7 +237,7 @@ async def test_data_flows_between_nodes():
             received_inputs[self.name] = msg.content
             return Msg(name=self.name, content=self._response, role="assistant")
 
-    async def _recording_build(resolved_node, tool_registry, daap_memory=None, tracker=None):
+    async def _recording_build(resolved_node, tool_registry, daap_memory=None, tracker=None, user_id=None):
         resp = {
             "input_parser": "PARSED_DATA",
             "researcher_a": "RESEARCH_A",
