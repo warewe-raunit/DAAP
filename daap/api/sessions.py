@@ -17,6 +17,7 @@ from agentscope.message import TextBlock
 from agentscope.tool import Toolkit, ToolResponse
 
 from daap.master.tools import generate_topology as generate_topology_tool
+from daap.skills.manager import apply_configured_skills
 
 logger = logging.getLogger(__name__)
 
@@ -74,9 +75,9 @@ class SessionManager:
     def __init__(self):
         self._sessions: dict[str, Session] = {}
 
-    def create_session(self) -> Session:
+    def create_session(self, user_id: str = "default") -> Session:
         session_id = str(uuid.uuid4())[:8]
-        session = Session(session_id=session_id, created_at=time.time())
+        session = Session(session_id=session_id, created_at=time.time(), user_id=user_id)
         self._sessions[session_id] = session
         return session
 
@@ -121,6 +122,7 @@ def create_session_scoped_toolkit(
     subagent model/operator settings before topology validation.
     """
     toolkit = Toolkit()
+    apply_configured_skills(toolkit, target="master")
 
     def _merge_operator_config(existing: dict | None, selected: dict) -> dict:
         existing_cfg = existing if isinstance(existing, dict) else {}
@@ -416,6 +418,8 @@ def create_session_scoped_toolkit(
                     resolved=resolved,
                     user_prompt=prompt,
                     tracker=session.token_tracker,
+                    daap_memory=daap_memory,
+                    user_id=session.user_id,
                 )
 
                 result_payload = {
@@ -501,11 +505,32 @@ def create_session_scoped_toolkit(
         ws_send = session._ws_send  # None in CLI, set by ws_handler for WebSocket
 
         try:
-            # RL: recommend configuration overrides (non-fatal)
+            # RL: recommend model tier per role via LinTS (non-fatal)
             if rl_optimizer is not None:
                 try:
-                    task_type = rl_optimizer.classify_task_type(user_prompt)
-                    topo_dict = rl_optimizer.recommend_overrides(topo_dict, task_type=task_type)
+                    from daap.optimizer.integration import get_tier_recommendations
+                    nodes = topo_dict.get("nodes", []) or []
+                    roles = [n.get("role", "") for n in nodes if isinstance(n, dict)]
+                    _has_parallel = any(
+                        isinstance(n, dict) and
+                        n.get("instance_config", {}).get("parallel_instances", 1) > 1
+                        for n in nodes
+                    )
+                    recs = get_tier_recommendations(
+                        user_id=session.user_id,
+                        user_prompt=user_prompt,
+                        proposed_roles=roles,
+                        node_count=len(roles),
+                        has_parallel=_has_parallel,
+                    )
+                    for node in nodes:
+                        if not isinstance(node, dict):
+                            continue
+                        role = node.get("role", "")
+                        if role in recs:
+                            op_override = node.get("operator_override", {})
+                            if not (isinstance(op_override, dict) and op_override.get("model_map")):
+                                node["model_tier"] = recs[role]
                 except Exception as _rl_exc:
                     logger.warning("RL override failed (non-fatal): %s", _rl_exc)
 
@@ -570,6 +595,24 @@ def create_session_scoped_toolkit(
                     "percent_complete": pct,
                     "current_node": nr.node_id,
                 })
+                # Memory: write agent diary entry (fire-and-forget)
+                if daap_memory is not None:
+                    try:
+                        node_role = next(
+                            (n.get("role", "unknown") for n in topo_dict.get("nodes", [])
+                             if isinstance(n, dict) and n.get("node_id") == nr.node_id),
+                            "unknown",
+                        )
+                        daap_memory.remember_node_output(
+                            user_id=session.user_id,
+                            role=node_role,
+                            node_output=getattr(nr, "output_text", ""),
+                            latency_seconds=getattr(nr, "latency_seconds", 0.0),
+                            model_used=getattr(nr, "model_id", "unknown"),
+                            success=True,
+                        )
+                    except Exception:
+                        pass
                 if ws_send:
                     import asyncio
                     asyncio.get_event_loop().create_task(ws_send({
@@ -590,6 +633,7 @@ def create_session_scoped_toolkit(
                 on_node_start=_on_node_start,
                 on_node_complete=_on_node_complete,
                 daap_memory=daap_memory,
+                user_id=session.user_id,
             )
 
             session.execution_result = {
@@ -602,31 +646,20 @@ def create_session_scoped_toolkit(
                 "total_output_tokens": result.total_output_tokens,
             }
 
-            # RL: record outcome (non-fatal)
-            if rl_optimizer is not None:
+            # Write run summary to memory (non-fatal, always — not gated on success)
+            if daap_memory is not None:
                 try:
-                    rl_optimizer.record_outcome(topo_dict, result)
-                except Exception as _rl_exc:
-                    logger.warning("RL record_outcome failed (non-fatal): %s", _rl_exc)
-
-            # Write run + agent learnings to memory (non-fatal)
-            if daap_memory is not None and result.success:
-                try:
-                    from daap.memory.writer import (
-                        write_run_to_memory,
-                        write_agent_learnings_from_run,
-                    )
-                    write_run_to_memory(
-                        memory=daap_memory,
+                    result_dict = {
+                        "topology_id": result.topology_id,
+                        "success": result.success,
+                        "error": result.error,
+                        "total_latency_seconds": result.total_latency_seconds,
+                        "total_cost_usd": 0,  # cost tracked via token_tracker
+                    }
+                    daap_memory.remember_run(
                         user_id=session.user_id,
-                        topology_summary=user_prompt,
-                        execution_result=result,
-                    )
-                    topology_nodes = topo_dict.get("nodes", [])
-                    write_agent_learnings_from_run(
-                        memory=daap_memory,
-                        execution_result=result,
-                        topology_nodes=topology_nodes,
+                        topology=topo_dict,
+                        execution_result=result_dict,
                     )
                 except Exception as _mem_exc:
                     logger.warning("Memory write failed (non-fatal): %s", _mem_exc)

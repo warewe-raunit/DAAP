@@ -57,7 +57,7 @@ def _create_session_with_mock_agent(client, response_text="Mock response"):
     """POST /session with mocked master agent. Returns session_id."""
     mock_agent = mock_agent_returning(response_text)
     with patch("daap.api.routes.create_master_agent_with_toolkit", return_value=mock_agent):
-        resp = client.post("/session")
+        resp = client.post("/session?user_id=test-user")
     assert resp.status_code == 200
     return resp.json()["session_id"], mock_agent
 
@@ -77,7 +77,7 @@ def test_create_session(client):
     """POST /session returns a session_id."""
     mock_agent = mock_agent_returning()
     with patch("daap.api.routes.create_master_agent_with_toolkit", return_value=mock_agent):
-        resp = client.post("/session")
+        resp = client.post("/session?user_id=test-user")
     assert resp.status_code == 200
     data = resp.json()
     assert "session_id" in data
@@ -149,8 +149,8 @@ def test_list_sessions(client):
     """GET /sessions lists created sessions."""
     mock_agent = mock_agent_returning()
     with patch("daap.api.routes.create_master_agent_with_toolkit", return_value=mock_agent):
-        client.post("/session")
-        client.post("/session")
+        client.post("/session?user_id=test-user")
+        client.post("/session?user_id=test-user")
 
     resp = client.get("/sessions")
     assert resp.status_code == 200
@@ -288,6 +288,24 @@ def test_session_scoped_toolkit_has_core_tools():
     assert "generate_topology" in registered
     assert "ask_user" in registered
     assert "get_execution_status" in registered
+
+
+def test_session_scoped_toolkit_applies_master_skills(monkeypatch):
+    """Session toolkit applies configured AgentScope skills for master target."""
+    import daap.api.sessions as sessions_module
+
+    seen: list[str] = []
+
+    def _fake_apply(toolkit, target):
+        seen.append(target)
+        return []
+
+    monkeypatch.setattr(sessions_module, "apply_configured_skills", _fake_apply)
+
+    session = Session(session_id="test-skills-01", created_at=0.0)
+    create_session_scoped_toolkit(session)
+
+    assert seen == ["master"]
 
 
 def test_session_scoped_toolkit_attaches_resolver():

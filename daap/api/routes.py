@@ -55,14 +55,36 @@ _rl_optimizer = None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup: purge expired, soft-deleted topologies.
+    mcp_manager = None
+
+    # Startup: purge expired topologies
     try:
         purged = topology_store.purge_expired()
         if purged:
             logger.info("Startup: purged %d expired topologies", purged)
     except Exception as exc:
         logger.warning("Startup purge failed (non-fatal): %s", exc)
-    yield
+
+    # Startup: MCP servers (optional)
+    try:
+        from daap.mcpx.manager import get_mcp_manager
+
+        mcp_manager = get_mcp_manager()
+        await mcp_manager.start_all()
+        connected = mcp_manager.list_connected()
+        if connected:
+            logger.info("MCP servers connected: %s", ", ".join(connected))
+    except Exception as exc:
+        logger.warning("MCP disabled (non-fatal): %s", exc)
+
+    try:
+        yield
+    finally:
+        if mcp_manager is not None:
+            try:
+                await mcp_manager.stop_all()
+            except Exception as exc:
+                logger.warning("MCP shutdown failed (non-fatal): %s", exc)
 
 
 app = FastAPI(
@@ -82,27 +104,30 @@ app.add_middleware(
 app.include_router(topology_router)
 
 def _get_memory():
-    """Lazy-init DaapMemory. Returns None if setup fails."""
+    """Lazy-init DaapMemory. Returns None if setup fails or keys missing."""
     global _daap_memory
     if _daap_memory is not None:
         return _daap_memory
     try:
-        from daap.memory.client import DaapMemory
-        _daap_memory = DaapMemory()
-        return _daap_memory
+        from daap.memory.palace import DaapMemory
+        mem = DaapMemory()
+        if mem.available:
+            _daap_memory = mem
+            return _daap_memory
+        return None
     except Exception as exc:
         logger.warning("Memory disabled: %s", exc)
         return None
 
 
 def _get_optimizer():
-    """Lazy-init TopologyOptimizer. Returns None if setup fails."""
+    """Return True if LinTS optimizer is available, None otherwise."""
     global _rl_optimizer
     if _rl_optimizer is not None:
         return _rl_optimizer
     try:
-        from daap.rl.optimizer import TopologyOptimizer
-        _rl_optimizer = TopologyOptimizer()
+        from daap.optimizer.integration import get_tier_recommendations  # noqa: F401
+        _rl_optimizer = True
         return _rl_optimizer
     except Exception as exc:
         logger.warning("RL optimizer disabled: %s", exc)
@@ -205,7 +230,7 @@ async def list_models():
 
 @app.post("/session")
 async def create_session(
-    user_id: str = "default",
+    user_id: str,
     master_model: str | None = None,
     subagent_model: str | None = None,
     subagent_fast_model: str | None = None,
@@ -229,8 +254,7 @@ async def create_session(
     optimizer = _get_optimizer()
     if memory:
         try:
-            from daap.memory.reader import load_user_context_for_master
-            user_context = load_user_context_for_master(memory, user_id)
+            user_context = memory.format_for_master_prompt(user_id, "")
         except Exception as exc:
             logger.warning("Failed to load user context: %s", exc)
 
@@ -323,26 +347,56 @@ async def rate_run(req: RatingRequest):
     optimizer = _get_optimizer()
     if optimizer is not None:
         try:
-            topology_id = (session.execution_result or {}).get("topology_id", "unknown")
-            optimizer.record_rating(topology_id, req.rating)
+            from daap.optimizer.integration import record_run_outcome
+            topo = session.pending_topology or {}
+            nodes = topo.get("nodes", []) or []
+            constraints = topo.get("constraints", {}) or {}
+            result = session.execution_result or {}
+            record_run_outcome(
+                user_id=session.user_id,
+                user_prompt=topo.get("user_prompt", ""),
+                node_configs={
+                    n.get("role", ""): n.get("model_tier", "smart")
+                    for n in nodes if isinstance(n, dict)
+                },
+                user_rating=req.rating,
+                actual_cost_usd=float(result.get("cost_usd", 0) or 0),
+                budget_usd=float(constraints.get("max_cost_usd", 0) or 0),
+                latency_seconds=float(result.get("latency_seconds", 0) or 0),
+                timeout_seconds=float(constraints.get("max_latency_seconds", 0) or 0),
+                topology_id=result.get("topology_id"),
+                node_count=len(nodes),
+                has_parallel=any(
+                    isinstance(n, dict) and
+                    n.get("instance_config", {}).get("parallel_instances", 1) > 1
+                    for n in nodes
+                ),
+            )
         except Exception as exc:
-            logger.warning("RL record_rating failed (non-fatal): %s", exc)
+            logger.warning("RL record_run_outcome failed (non-fatal): %s", exc)
 
     # Mem0 feedback (optional)
     memory = _get_memory()
     if memory:
         try:
-            from daap.memory.writer import write_user_feedback
-            write_user_feedback(
-                memory,
+            topo = session.pending_topology or {}
+            nodes = topo.get("nodes", []) or []
+            result = session.execution_result or {}
+            topology_summary = f"{len(nodes)} nodes, ${float(result.get('cost_usd', 0) or 0):.4f}"
+            memory.remember_run(
                 user_id=session.user_id,
-                feedback_text=(
-                    f"User rated run {req.rating}/5."
-                    + (f" Comment: {req.comment}" if req.comment else "")
-                ),
+                topology=topo,
+                execution_result=result,
+                user_rating=req.rating,
+            )
+            memory.remember_correction(
+                user_id=session.user_id,
+                rating=req.rating,
+                comment=req.comment or None,
+                topology_summary=topology_summary,
             )
         except Exception as exc:
-            logger.warning("Failed to write feedback to memory: %s", exc)
+            logger.warning("Failed to write memory feedback: %s", exc)
 
     return {"status": "rated", "rating": req.rating}
 
@@ -351,6 +405,55 @@ async def rate_run(req: RatingRequest):
 async def get_run_history(session_id: str):
     """Get execution history for a session."""
     return {"runs": feedback_store.get_runs_for_session(session_id)}
+
+
+# ---------------------------------------------------------------------------
+# Memory inspection
+# ---------------------------------------------------------------------------
+
+@app.get("/api/v1/memory/{user_id}/profile")
+async def get_memory_profile(user_id: str):
+    """Return user profile memories stored in Mem0."""
+    memory = _get_memory()
+    if memory is None:
+        raise HTTPException(status_code=503, detail="Memory not available")
+    try:
+        profile = memory.get_user_profile(user_id)
+        return {"user_id": user_id, "profile": profile}
+    except Exception as exc:
+        logger.warning("Failed to load memory profile: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/api/v1/memory/{user_id}/history")
+async def get_memory_history(user_id: str, q: str = ""):
+    """Return past run summaries from Mem0 for a user."""
+    memory = _get_memory()
+    if memory is None:
+        raise HTTPException(status_code=503, detail="Memory not available")
+    try:
+        history = memory.get_past_runs(user_id, query=q)
+        return {"user_id": user_id, "history": history}
+    except Exception as exc:
+        logger.warning("Failed to load memory history: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+
+@app.delete("/api/v1/memory/{user_id}")
+async def delete_user_memory(user_id: str):
+    """Delete all Mem0 memories for a user."""
+    memory = _get_memory()
+    if memory is None:
+        raise HTTPException(status_code=503, detail="Memory not available")
+    try:
+        from daap.memory.config import get_memory_client
+        client = get_memory_client()
+        client.delete_all(user_id=user_id)
+        return {"status": "deleted", "user_id": user_id}
+    except Exception as exc:
+        logger.warning("Failed to delete user memory: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
 
 
 # ---------------------------------------------------------------------------
