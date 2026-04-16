@@ -404,6 +404,15 @@ class TopologyStore:
             ).fetchall()
             return [self._row_to_topology(row) for row in rows]
 
+    def count_runs(self, user_id: str) -> int:
+        """Count total execution runs for a user."""
+        with sqlite3.connect(self.db_path) as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) FROM topology_runs WHERE user_id = ?",
+                (user_id,),
+            ).fetchone()
+        return row[0] if row else 0
+
     def list_topologies(self, user_id: str, include_deleted: bool = False) -> list[StoredTopology]:
         """
         List one row per topology_id (latest version per topology).
