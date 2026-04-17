@@ -910,24 +910,125 @@ async def _remote_main(args: argparse.Namespace) -> None:
                     if cmd in ("quit", "exit", "bye"):
                         print("Bye!")
                         break
+
                     if cmd == "help":
-                        _print_system("Commands: /approve /cheaper /cancel /raw /clean /quit")
+                        _print_system("Commands: /help /approve /cheaper /cancel /sessions /history /memory /topology /profile /mcp /skills /skill /clear /raw /clean /quit")
                         continue
+
                     if cmd == "raw":
                         raw_output = True
                         _print_system("Raw output enabled.")
                         continue
+
                     if cmd == "clean":
                         raw_output = False
                         _print_system("Clean output enabled.")
                         continue
+
                     if cmd == "approve":
                         user_input = "Proceed with this topology and continue."
-                    if cmd == "cheaper":
+                        # fall through to send as message
+
+                    elif cmd == "cheaper":
                         await ws.send(json.dumps({"type": "make_cheaper"}))
                         continue
-                    if cmd == "cancel":
+
+                    elif cmd == "cancel":
                         await ws.send(json.dumps({"type": "cancel"}))
+                        continue
+
+                    elif cmd == "clear":
+                        _save_session(user_id, session_id, [])
+                        _print_system("Session history cleared on client.")
+                        continue
+
+                    elif cmd == "sessions":
+                        saved = _list_sessions(user_id)
+                        if not saved:
+                            _print_system("No saved sessions.")
+                        else:
+                            import datetime
+                            _print_system(f"Saved sessions ({len(saved)}):")
+                            for s in saved[:10]:
+                                ts = datetime.datetime.fromtimestamp(s["saved_at"]).strftime("%Y-%m-%d %H:%M")
+                                active = " ← current" if s["session_id"] == session_id else ""
+                                print(f"  {s['session_id']}  {ts}  ({s['messages']} messages){active}")
+                            _print_system(f"Resume: python scripts/chat.py --api-url {api_url} --session <id>")
+                        continue
+
+                    elif cmd == "profile":
+                        display = user_id.replace("-", " ").title()
+                        _print_system(f"User: {display} ({user_id})")
+                        _print_system(f"Server: {api_url}")
+                        _print_system(f"Session: {session_id}")
+                        try:
+                            async with httpx.AsyncClient(timeout=5) as hc:
+                                r = await hc.get(f"{api_url}/api/v1/memory/{user_id}/profile")
+                                if r.status_code == 200:
+                                    facts = r.json().get("profile", [])
+                                    if facts:
+                                        _print_system(f"Memory ({len(facts)} facts):")
+                                        for f in facts[:5]:
+                                            print(f"  - {f}")
+                                    else:
+                                        _print_system("Memory: no facts stored yet")
+                                else:
+                                    _print_system("Memory: unavailable on server")
+                        except Exception:
+                            _print_system("Memory: could not reach server")
+                        continue
+
+                    elif cmd == "history" or cmd == "topology":
+                        _print_system("Topology history lives on the server.")
+                        _print_system(f"View via: curl {api_url}/topology/{session_id}")
+                        continue
+
+                    elif cmd.startswith("topology load"):
+                        _print_system("Topology load not supported in remote mode — ask the agent to re-run a previous task.")
+                        continue
+
+                    elif cmd.startswith("memory"):
+                        parts = cmd.split(None, 2)
+                        sub = parts[1] if len(parts) > 1 else ""
+                        try:
+                            async with httpx.AsyncClient(timeout=5) as hc:
+                                if sub == "search" and len(parts) > 2:
+                                    r = await hc.get(f"{api_url}/api/v1/memory/{user_id}/history", params={"q": parts[2]})
+                                    items = r.json().get("history", []) if r.status_code == 200 else []
+                                    if items:
+                                        _print_system(f"Memory search '{parts[2]}' ({len(items)} results):")
+                                        for i, m in enumerate(items, 1):
+                                            print(f"  {i}. {m}")
+                                    else:
+                                        _print_system("No matching facts found.")
+                                elif sub == "clear":
+                                    confirm = await asyncio.get_running_loop().run_in_executor(None, input, "Delete ALL memory on server? [y/N]: ")
+                                    if confirm.strip().lower() == "y":
+                                        r = await hc.delete(f"{api_url}/api/v1/memory/{user_id}")
+                                        _print_system("All memory deleted." if r.status_code == 200 else f"Failed: {r.text}")
+                                    else:
+                                        _print_system("Cancelled.")
+                                else:
+                                    r = await hc.get(f"{api_url}/api/v1/memory/{user_id}/profile")
+                                    items = r.json().get("profile", []) if r.status_code == 200 else []
+                                    if items:
+                                        _print_system(f"Memory facts ({len(items)}):")
+                                        for i, m in enumerate(items, 1):
+                                            print(f"  {i}. {m}")
+                                        _print_system("Usage: /memory search <query> | /memory clear")
+                                    else:
+                                        _print_system("No memory facts stored.")
+                        except Exception as exc:
+                            _print_system(f"Memory error: {exc}")
+                        continue
+
+                    elif cmd == "mcp":
+                        _print_system("MCP servers run on the server — not visible from remote CLI.")
+                        _print_system(f"Check server logs: docker compose logs daap")
+                        continue
+
+                    elif cmd == "skills" or cmd.startswith("skill"):
+                        _print_system("Skills are loaded on the server — not configurable from remote CLI.")
                         continue
 
                     await ws.send(json.dumps({"type": "message", "content": user_input}))
