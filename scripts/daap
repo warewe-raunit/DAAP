@@ -1,0 +1,40 @@
+#!/bin/bash
+# daap — DAAP CLI launcher
+#
+# Usage:
+#   daap                  → new session
+#   daap <session_id>     → resume specific session
+#   daap --help           → show help
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+VENV="$HOME/.daap-venv"
+CHAT="$SCRIPT_DIR/chat.py"
+PYTHON="$VENV/bin/python3"
+
+if [ ! -f "$PYTHON" ]; then
+    echo "[daap] venv not found at $VENV. Run: bash setup.sh"
+    exit 1
+fi
+
+if [ ! -f "$CHAT" ]; then
+    echo "[daap] chat.py not found at $CHAT"
+    exit 1
+fi
+
+# Pass through --help
+if [ "$1" = "--help" ] || [ "$1" = "-h" ]; then
+    exec "$PYTHON" "$CHAT" --help
+fi
+
+# No args → new session
+if [ -z "$1" ]; then
+    exec "$PYTHON" "$CHAT" --new
+fi
+
+# First arg looks like a flag → pass everything through
+if [[ "$1" == --* ]]; then
+    exec "$PYTHON" "$CHAT" "$@"
+fi
+
+# First arg is a session ID → resume it
+exec "$PYTHON" "$CHAT" --session "$1" "${@:2}"

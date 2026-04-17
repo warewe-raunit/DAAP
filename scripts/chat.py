@@ -101,6 +101,17 @@ def _parse_args() -> argparse.Namespace:
         help="Connect to a remote DAAP server instead of running locally. "
              "Example: --api-url http://107.174.35.26:8000",
     )
+    parser.add_argument(
+        "--api-key",
+        metavar="KEY",
+        default=None,
+        help="API key for the remote DAAP server (overrides DAAP_API_KEY env var).",
+    )
+    parser.add_argument(
+        "--new",
+        action="store_true",
+        help="Force a new session instead of resuming the last one.",
+    )
     return parser.parse_args()
 
 
@@ -816,9 +827,27 @@ async def _remote_main(args: argparse.Namespace) -> None:
     import httpx
     import websockets
 
-    api_url = args.api_url.rstrip("/")
+    # Resolve API URL: flag > ~/.daap/server file
+    _api_url_arg = args.api_url or None
+    if not _api_url_arg:
+        _server_file = pathlib.Path.home() / ".daap" / "server"
+        if _server_file.exists():
+            _api_url_arg = _server_file.read_text(encoding="utf-8").strip()
+    if not _api_url_arg:
+        _print_error("No server URL. Pass --api-url or run: echo 'http://<ip>:8000' > ~/.daap/server")
+        return
+
+    api_url = _api_url_arg.rstrip("/")
     raw_output = bool(args.raw_output)
     _print_header(raw_output)
+
+    # Resolve API key: --api-key flag > DAAP_API_KEY env > None (open server)
+    api_key: str | None = args.api_key or os.environ.get("DAAP_API_KEY") or None
+    _auth_headers: dict[str, str] = {"X-API-Key": api_key} if api_key else {}
+    if api_key:
+        _print_system("Auth: API key loaded")
+    else:
+        _print_system("Auth: no key — server must be in open mode")
 
     # Resolve user identity
     is_new_user = load_local_user() is None
@@ -827,22 +856,28 @@ async def _remote_main(args: argparse.Namespace) -> None:
     _print_system(f"Remote mode → {api_url}")
 
     # Try to reuse an existing server session, else create one
-    existing_sid = args.session or _load_remote_session(user_id, api_url)
+    existing_sid = None if args.new else (args.session or _load_remote_session(user_id, api_url))
     session_id: str | None = None
 
-    async with httpx.AsyncClient(timeout=10) as http:
+    async with httpx.AsyncClient(timeout=10, headers=_auth_headers) as http:
         if existing_sid:
             try:
                 r = await http.get(f"{api_url}/session/{existing_sid}/config")
                 if r.status_code == 200:
                     session_id = existing_sid
                     _print_system(f"Session resumed: {session_id}")
+                elif r.status_code == 401:
+                    _print_error("Auth failed (401). Set DAAP_API_KEY or pass --api-key.")
+                    return
             except Exception:
                 pass
 
         if session_id is None:
             try:
                 r = await http.post(f"{api_url}/session", params={"user_id": user_id})
+                if r.status_code == 401:
+                    _print_error("Auth failed (401). Set DAAP_API_KEY or pass --api-key.")
+                    return
                 r.raise_for_status()
                 session_id = r.json()["session_id"]
                 _print_system(f"Session {session_id} ready")
@@ -861,14 +896,15 @@ async def _remote_main(args: argparse.Namespace) -> None:
     _completer = WordCompleter(_commands, sentence=True)
     _prompt_session: PromptSession = PromptSession(completer=_completer, complete_while_typing=True)
 
-    ws_endpoint = _ws_url(api_url, f"/ws/{session_id}")
-    _print_system(f"Connecting to {ws_endpoint} ...")
+    _ws_path = f"/ws/{session_id}" + (f"?token={api_key}" if api_key else "")
+    ws_endpoint = _ws_url(api_url, _ws_path)
+    _print_system(f"Connecting to {_ws_url(api_url, f'/ws/{session_id}')} ...")
 
     _last_result_received = False   # flag: execution result shown, rating expected
 
     async def _submit_rating_remote(rating: int, comment: str) -> None:
         try:
-            async with httpx.AsyncClient(timeout=5) as hc:
+            async with httpx.AsyncClient(timeout=5, headers=_auth_headers) as hc:
                 r = await hc.post(f"{api_url}/rate", json={
                     "session_id": session_id,
                     "rating": rating,
@@ -1080,7 +1116,7 @@ async def _remote_main(args: argparse.Namespace) -> None:
                         _print_system(f"Server: {api_url}")
                         _print_system(f"Session: {session_id}")
                         try:
-                            async with httpx.AsyncClient(timeout=5) as hc:
+                            async with httpx.AsyncClient(timeout=5, headers=_auth_headers) as hc:
                                 r = await hc.get(f"{api_url}/api/v1/memory/{user_id}/profile")
                                 if r.status_code == 200:
                                     facts = r.json().get("profile", [])
@@ -1098,7 +1134,7 @@ async def _remote_main(args: argparse.Namespace) -> None:
 
                     elif cmd == "history" or cmd == "topology" or cmd.startswith("topology"):
                         try:
-                            async with httpx.AsyncClient(timeout=5) as hc:
+                            async with httpx.AsyncClient(timeout=5, headers=_auth_headers) as hc:
                                 r = await hc.get(f"{api_url}/api/v1/topologies/{user_id}")
                                 topos = r.json().get("topologies", []) if r.status_code == 200 else []
                                 if not topos:
@@ -1118,7 +1154,7 @@ async def _remote_main(args: argparse.Namespace) -> None:
                         parts = cmd.split(None, 2)
                         sub = parts[1] if len(parts) > 1 else ""
                         try:
-                            async with httpx.AsyncClient(timeout=5) as hc:
+                            async with httpx.AsyncClient(timeout=5, headers=_auth_headers) as hc:
                                 if sub == "search" and len(parts) > 2:
                                     r = await hc.get(f"{api_url}/api/v1/memory/{user_id}/history", params={"q": parts[2]})
                                     items = r.json().get("history", []) if r.status_code == 200 else []
@@ -1617,7 +1653,9 @@ async def main(args: argparse.Namespace | None = None):
 
 if __name__ == "__main__":
     _args = _parse_args()
-    if _args.api_url:
+    _server_file = pathlib.Path.home() / ".daap" / "server"
+    _use_remote = bool(_args.api_url) or _server_file.exists()
+    if _use_remote:
         asyncio.run(_remote_main(_args))
     else:
         asyncio.run(main(_args))

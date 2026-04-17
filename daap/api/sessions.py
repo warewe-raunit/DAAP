@@ -9,8 +9,8 @@ bug from Section 4's module-level state.
 import asyncio
 import json
 import logging
+import secrets
 import time
-import uuid
 from dataclasses import dataclass, field
 
 from agentscope.message import TextBlock
@@ -79,7 +79,7 @@ class SessionManager:
         self._sessions: dict[str, Session] = {}
 
     def create_session(self, user_id: str = "default") -> Session:
-        session_id = str(uuid.uuid4())[:8]
+        session_id = secrets.token_urlsafe(32)
         session = Session(session_id=session_id, created_at=time.time(), user_id=user_id)
         self._sessions[session_id] = session
         return session

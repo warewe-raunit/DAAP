@@ -18,10 +18,11 @@ WebSocket:
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, WebSocket
+from fastapi import Depends, FastAPI, HTTPException, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
+from daap.api.auth import require_api_key, validate_ws_token
 from daap.api.sessions import SessionManager, create_session_scoped_toolkit
 from daap.api.topology_routes import (
     router as topology_router,
@@ -228,7 +229,7 @@ async def list_models():
 # Session management
 # ---------------------------------------------------------------------------
 
-@app.post("/session")
+@app.post("/session", dependencies=[Depends(require_api_key)])
 async def create_session(
     user_id: str,
     master_model: str | None = None,
@@ -274,7 +275,7 @@ async def create_session(
     return {"session_id": session.session_id}
 
 
-@app.get("/session/{session_id}/config")
+@app.get("/session/{session_id}/config", dependencies=[Depends(require_api_key)])
 async def get_session_config(session_id: str):
     """Return the selected master/subagent model configuration for a session."""
     session = session_manager.get_session(session_id)
@@ -289,12 +290,12 @@ async def get_session_config(session_id: str):
     }
 
 
-@app.get("/sessions")
+@app.get("/sessions", dependencies=[Depends(require_api_key)])
 async def list_sessions():
     return {"sessions": session_manager.list_sessions()}
 
 
-@app.delete("/session/{session_id}")
+@app.delete("/session/{session_id}", dependencies=[Depends(require_api_key)])
 async def delete_session(session_id: str):
     session_manager.delete_session(session_id)
     return {"status": "deleted"}
@@ -304,7 +305,7 @@ async def delete_session(session_id: str):
 # Topology inspection
 # ---------------------------------------------------------------------------
 
-@app.get("/topology/{session_id}")
+@app.get("/topology/{session_id}", dependencies=[Depends(require_api_key)])
 async def get_topology(session_id: str):
     """Return the pending topology for a session (if any)."""
     session = session_manager.get_session(session_id)
@@ -316,7 +317,7 @@ async def get_topology(session_id: str):
     }
 
 
-@app.get("/api/v1/topologies/{user_id}")
+@app.get("/api/v1/topologies/{user_id}", dependencies=[Depends(require_api_key)])
 async def list_user_topologies(user_id: str, limit: int = 10):
     """List saved topologies for a user, newest first."""
     import datetime
@@ -335,7 +336,7 @@ async def list_user_topologies(user_id: str, limit: int = 10):
     }
 
 
-@app.get("/api/v1/topologies/{user_id}/{topology_id}/runs")
+@app.get("/api/v1/topologies/{user_id}/{topology_id}/runs", dependencies=[Depends(require_api_key)])
 async def list_topology_runs(user_id: str, topology_id: str, limit: int = 5):
     """List recent runs for a topology."""
     import datetime
@@ -364,7 +365,7 @@ class RatingRequest(BaseModel):
     comment: str = ""
 
 
-@app.post("/rate")
+@app.post("/rate", dependencies=[Depends(require_api_key)])
 async def rate_run(req: RatingRequest):
     """Rate the output of a completed execution run."""
     session = session_manager.get_session(req.session_id)
@@ -439,7 +440,7 @@ async def rate_run(req: RatingRequest):
     return {"status": "rated", "rating": req.rating}
 
 
-@app.get("/runs/{session_id}")
+@app.get("/runs/{session_id}", dependencies=[Depends(require_api_key)])
 async def get_run_history(session_id: str):
     """Get execution history for a session."""
     return {"runs": feedback_store.get_runs_for_session(session_id)}
@@ -449,7 +450,7 @@ async def get_run_history(session_id: str):
 # Memory inspection
 # ---------------------------------------------------------------------------
 
-@app.get("/api/v1/memory/{user_id}/profile")
+@app.get("/api/v1/memory/{user_id}/profile", dependencies=[Depends(require_api_key)])
 async def get_memory_profile(user_id: str):
     """Return user profile memories stored in Mem0."""
     memory = _get_memory()
@@ -463,7 +464,7 @@ async def get_memory_profile(user_id: str):
         raise HTTPException(status_code=500, detail=str(exc))
 
 
-@app.get("/api/v1/memory/{user_id}/history")
+@app.get("/api/v1/memory/{user_id}/history", dependencies=[Depends(require_api_key)])
 async def get_memory_history(user_id: str, q: str = ""):
     """Return past run summaries from Mem0 for a user."""
     memory = _get_memory()
@@ -478,7 +479,7 @@ async def get_memory_history(user_id: str, q: str = ""):
 
 
 
-@app.delete("/api/v1/memory/{user_id}")
+@app.delete("/api/v1/memory/{user_id}", dependencies=[Depends(require_api_key)])
 async def delete_user_memory(user_id: str):
     """Delete all Mem0 memories for a user."""
     memory = _get_memory()
@@ -499,12 +500,19 @@ async def delete_user_memory(user_id: str):
 # ---------------------------------------------------------------------------
 
 @app.websocket("/ws/{session_id}")
-async def websocket_endpoint(websocket: WebSocket, session_id: str):
+async def websocket_endpoint(websocket: WebSocket, session_id: str, token: str | None = None):
     """
     WebSocket endpoint for real-time conversation with the master agent.
 
     Client must first POST /session to get a session_id, then connect here.
+    Pass the API key as ?token=<key> query parameter.
     """
+    try:
+        validate_ws_token(token)
+    except HTTPException:
+        await websocket.close(code=4001, reason="Unauthorized")
+        return
+
     session = session_manager.get_session(session_id)
     if session is None:
         await websocket.close(code=4004, reason="Session not found")
