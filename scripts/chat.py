@@ -2,7 +2,8 @@
 DAAP CLI Chat — real-time terminal interface to the master agent.
 
 Usage:
-    python scripts/chat.py [--raw-output]
+    python scripts/chat.py [--raw-output] [--session ID]
+    python scripts/chat.py --api-url http://107.174.35.26:8000   # remote server
 
 Commands during chat:
     /help        — show command help
@@ -92,6 +93,13 @@ def _parse_args() -> argparse.Namespace:
         metavar="SESSION_ID",
         default=None,
         help="Resume a previous session by ID (e.g. python chat.py --session abc123).",
+    )
+    parser.add_argument(
+        "--api-url",
+        metavar="URL",
+        default=None,
+        help="Connect to a remote DAAP server instead of running locally. "
+             "Example: --api-url http://107.174.35.26:8000",
     )
     return parser.parse_args()
 
@@ -700,11 +708,235 @@ def _make_cli_progress_send():
 
 
 # ---------------------------------------------------------------------------
+# Remote mode — WebSocket client against a DAAP server
+# ---------------------------------------------------------------------------
+
+def _ws_url(api_url: str, path: str) -> str:
+    """Convert http(s):// base URL to ws(s):// WebSocket URL."""
+    base = api_url.rstrip("/")
+    if base.startswith("https://"):
+        return "wss://" + base[len("https://"):] + path
+    return "ws://" + base.removeprefix("http://") + path
+
+
+def _remote_session_file(user_id: str, api_url: str) -> pathlib.Path:
+    host = api_url.rstrip("/").split("//")[-1].replace(":", "_").replace("/", "_")
+    p = pathlib.Path.home() / ".daap" / "sessions" / user_id / "remote"
+    p.mkdir(parents=True, exist_ok=True)
+    return p / f"{host}.json"
+
+
+def _save_remote_session(user_id: str, api_url: str, session_id: str) -> None:
+    try:
+        _remote_session_file(user_id, api_url).write_text(
+            json.dumps({"session_id": session_id, "api_url": api_url, "saved_at": time.time()}),
+            encoding="utf-8",
+        )
+    except Exception:
+        pass
+
+
+def _load_remote_session(user_id: str, api_url: str) -> str | None:
+    try:
+        data = json.loads(_remote_session_file(user_id, api_url).read_text(encoding="utf-8"))
+        return data.get("session_id")
+    except Exception:
+        return None
+
+
+async def _remote_main(args: argparse.Namespace) -> None:
+    import httpx
+    import websockets
+
+    api_url = args.api_url.rstrip("/")
+    raw_output = bool(args.raw_output)
+    _print_header(raw_output)
+
+    # Resolve user identity
+    is_new_user = load_local_user() is None
+    user_id = await asyncio.get_running_loop().run_in_executor(None, resolve_cli_user)
+
+    _print_system(f"Remote mode → {api_url}")
+
+    # Try to reuse an existing server session, else create one
+    existing_sid = args.session or _load_remote_session(user_id, api_url)
+    session_id: str | None = None
+
+    async with httpx.AsyncClient(timeout=10) as http:
+        if existing_sid:
+            try:
+                r = await http.get(f"{api_url}/session/{existing_sid}/config")
+                if r.status_code == 200:
+                    session_id = existing_sid
+                    _print_system(f"Session resumed: {session_id}")
+            except Exception:
+                pass
+
+        if session_id is None:
+            try:
+                r = await http.post(f"{api_url}/session", params={"user_id": user_id})
+                r.raise_for_status()
+                session_id = r.json()["session_id"]
+                _print_system(f"Session {session_id} ready")
+                _print_system(f"Resume later: python scripts/chat.py --api-url {api_url} --session {session_id}")
+            except Exception as exc:
+                _print_error(f"Could not create server session: {exc}")
+                _print_error(f"Is the server running at {api_url}?")
+                return
+
+    _save_remote_session(user_id, api_url, session_id)
+
+    _commands = [
+        "/help", "/approve", "/cheaper", "/cancel",
+        "/raw", "/clean", "/quit",
+    ]
+    _completer = WordCompleter(_commands, sentence=True)
+    _prompt_session: PromptSession = PromptSession(completer=_completer, complete_while_typing=True)
+
+    ws_endpoint = _ws_url(api_url, f"/ws/{session_id}")
+    _print_system(f"Connecting to {ws_endpoint} ...")
+
+    try:
+        async with websockets.connect(ws_endpoint, ping_interval=30) as ws:
+            _print_system("Connected. Type your message or /help.")
+
+            async def _recv_loop():
+                """Background task: receive server events and render them."""
+                pending_plan: dict | None = None
+                nonlocal raw_output, pending_plan
+
+                async for raw in ws:
+                    event = json.loads(raw)
+                    etype = event.get("type")
+
+                    if etype == "response":
+                        _print_agent(event.get("content", ""), raw_output=raw_output)
+                        usage = event.get("usage", {})
+                        _print_usage(usage)
+
+                    elif etype == "plan":
+                        topo_stub = {"nodes": []}  # server holds the real topo
+                        est = {
+                            "total_cost_usd": event.get("cost_usd", 0),
+                            "total_latency_seconds": event.get("latency_seconds", 0),
+                        }
+                        print(f"\n{YELLOW}{BOLD}plan{RESET}")
+                        _print_wrapped(f"Est cost : ${est['total_cost_usd']:.4f}", indent=2)
+                        _print_wrapped(f"Est time : {est['total_latency_seconds']:.0f}s", indent=2)
+                        print(f"\n{YELLOW}Next: /approve | /cheaper | /cancel{RESET}\n")
+                        pending_plan = event
+
+                    elif etype == "executing":
+                        total = event.get("total_nodes", "?")
+                        print(f"{DIM}  [executing {total} nodes]{RESET}", flush=True)
+
+                    elif etype == "progress":
+                        ev = event.get("event", "")
+                        node_id = event.get("node_id", "?")
+                        done = event.get("completed_nodes", 0)
+                        total = event.get("total_nodes", 0)
+                        bar_width = 20
+                        filled = int((done / total) * bar_width) if total else 0
+                        bar = "█" * filled + "░" * (bar_width - filled)
+                        if ev == "node_start":
+                            print(f"\r{DIM}  [{bar}] {done}/{total}  running: {node_id}{RESET}    ", end="", flush=True)
+                        elif ev == "node_complete":
+                            filled2 = int((done / total) * bar_width) if total else 0
+                            bar2 = "█" * filled2 + "░" * (bar_width - filled2)
+                            suffix = "done" if done >= total else f"done: {node_id}"
+                            end = "\n" if done >= total else ""
+                            print(f"\r{DIM}  [{bar2}] {done}/{total}  {suffix}{RESET}    ", end=end, flush=True)
+
+                    elif etype == "result":
+                        output = event.get("output", "")
+                        latency = event.get("latency_seconds", 0)
+                        models = event.get("models", [])
+                        usage = event.get("usage", {})
+                        _print_result(output, latency, models, usage)
+
+                    elif etype == "questions":
+                        questions = event.get("questions", [])
+                        print(f"\n{YELLOW}{BOLD}DAAP needs more info:{RESET}")
+                        answers = []
+                        for i, q in enumerate(questions, 1):
+                            print(f"\n  {BOLD}Q{i}:{RESET} {q.get('question', '')}")
+                            options = q.get("options", [])
+                            if options:
+                                for j, opt in enumerate(options):
+                                    label = opt.get("label", "")
+                                    desc = opt.get("description", "")
+                                    print(f"    {j+1}. {label}" + (f" — {desc}" if desc else ""))
+                                print(f"    {DIM}Enter number or type your answer:{RESET} ", end="", flush=True)
+                            else:
+                                print(f"    {DIM}Your answer:{RESET} ", end="", flush=True)
+                            raw_ans = await asyncio.get_running_loop().run_in_executor(None, input, "")
+                            raw_ans = raw_ans.strip()
+                            if options and raw_ans.isdigit():
+                                idx = int(raw_ans) - 1
+                                if 0 <= idx < len(options):
+                                    raw_ans = options[idx]["label"]
+                            answers.append(raw_ans)
+                        await ws.send(json.dumps({"type": "answer", "answers": answers}))
+
+                    elif etype == "error":
+                        _print_error(f"Server error: {event.get('message', '')}")
+
+            recv_task = asyncio.create_task(_recv_loop())
+
+            try:
+                while True:
+                    try:
+                        with patch_stdout():
+                            user_input = await _prompt_session.prompt_async("You: ")
+                        user_input = user_input.strip()
+                    except (EOFError, KeyboardInterrupt):
+                        print("\nBye!")
+                        break
+
+                    if not user_input:
+                        continue
+
+                    cmd = user_input.lower().strip().lstrip("/")
+
+                    if cmd in ("quit", "exit", "bye"):
+                        print("Bye!")
+                        break
+                    if cmd == "help":
+                        _print_system("Commands: /approve /cheaper /cancel /raw /clean /quit")
+                        continue
+                    if cmd == "raw":
+                        raw_output = True
+                        _print_system("Raw output enabled.")
+                        continue
+                    if cmd == "clean":
+                        raw_output = False
+                        _print_system("Clean output enabled.")
+                        continue
+                    if cmd == "approve":
+                        user_input = "Proceed with this topology and continue."
+                    if cmd == "cheaper":
+                        await ws.send(json.dumps({"type": "make_cheaper"}))
+                        continue
+                    if cmd == "cancel":
+                        await ws.send(json.dumps({"type": "cancel"}))
+                        continue
+
+                    await ws.send(json.dumps({"type": "message", "content": user_input}))
+
+            finally:
+                recv_task.cancel()
+
+    except Exception as exc:
+        _print_error(f"WebSocket error: {exc}")
+
+
+# ---------------------------------------------------------------------------
 # Main chat loop
 # ---------------------------------------------------------------------------
 
-async def main():
-    args = _parse_args()
+async def main(args: argparse.Namespace | None = None):
+    if args is None:
+        args = _parse_args()
     raw_output = bool(args.raw_output)
     _print_header(raw_output)
 
@@ -1112,4 +1344,8 @@ async def main():
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    _args = _parse_args()
+    if _args.api_url:
+        asyncio.run(_remote_main(_args))
+    else:
+        asyncio.run(main(_args))
