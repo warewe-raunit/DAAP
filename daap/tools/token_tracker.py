@@ -51,6 +51,23 @@ class TokenTracker:
                 seen.append(c.model_id)
         return seen
 
+    def total_cost_usd(self, pricing_fn) -> float:
+        """
+        Compute total spend in USD.
+
+        pricing_fn: callable(model_id: str) -> {"input_per_1m": float, "output_per_1m": float}
+        Uses dependency inversion — caller supplies the pricing lookup so this
+        module stays free of resolver imports.
+        """
+        total = 0.0
+        for c in self._calls:
+            pricing = pricing_fn(c.model_id)
+            total += (
+                c.input_tokens * pricing["input_per_1m"] / 1_000_000
+                + c.output_tokens * pricing["output_per_1m"] / 1_000_000
+            )
+        return total
+
     def to_dict(self) -> dict:
         return {
             "input_tokens": self.total_input,

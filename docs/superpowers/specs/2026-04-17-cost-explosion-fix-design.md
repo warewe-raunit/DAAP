@@ -111,21 +111,12 @@ Note: `contextvars` context propagates to child tasks created with
 task (`asyncio.create_task(session.master_agent(...))`), the variable is shared
 correctly within a session and isolated across sessions.
 
-### 6. Estimation: Add Claude + Common Model Pricing
+### 6. Estimation: Model Pricing Coverage
 
-Add to `MODEL_PRICING` in `resolver.py`:
-
-```python
-# Claude (Anthropic via OpenRouter) — April 2026
-"claude-haiku-4-5-20251001":  {"input_per_1m": 0.80,  "output_per_1m": 4.00},
-"anthropic/claude-haiku-4-5-20251001": {"input_per_1m": 0.80,  "output_per_1m": 4.00},
-"claude-sonnet-4-6":          {"input_per_1m": 3.00,  "output_per_1m": 15.00},
-"anthropic/claude-sonnet-4-6":{"input_per_1m": 3.00,  "output_per_1m": 15.00},
-"claude-opus-4-6":            {"input_per_1m": 15.00, "output_per_1m": 75.00},
-"anthropic/claude-opus-4-6":  {"input_per_1m": 15.00, "output_per_1m": 75.00},
-```
-
-Store both bare and `anthropic/`-prefixed forms since `node_builder.py` may prefix bare IDs.
+No additional models added (Anthropic/Claude models excluded — cost).
+`DEFAULT_PRICING` ($1/$5 per 1M) remains the fallback for unknown models.
+Operators using non-registry models see conservative overestimates, which is
+acceptable — better to overestimate than underestimate cost.
 
 ### 7. Estimation: Adaptive Display Format
 

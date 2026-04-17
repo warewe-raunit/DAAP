@@ -204,6 +204,7 @@ class ConstraintSpec(BaseModel):
     max_nodes: int = 10
     max_total_instances: int = 20
     max_retries_per_node: int = 2
+    max_tokens_per_node: int = 50_000   # per-node token budget (input + output)
 
 
 class TopologySpec(BaseModel):

@@ -145,6 +145,15 @@ def _estimate_node(node: ResolvedNode) -> NodeEstimate:
     )
 
 
+def _format_cost(usd: float) -> str:
+    """Adaptive cost display — avoids collapsing sub-cent values to $0.00."""
+    if usd < 0.001:
+        return f"${usd:.5f}"
+    if usd < 0.10:
+        return f"${usd:.4f}"
+    return f"${usd:.2f}"
+
+
 def _build_user_summary(resolved: ResolvedTopology, node_estimates: list[NodeEstimate],
                         total_cost: float, total_latency: float) -> str:
     node_map = {n.node_id: n for n in resolved.nodes}
@@ -163,7 +172,7 @@ def _build_user_summary(resolved: ResolvedTopology, node_estimates: list[NodeEst
     plan = " → ".join(steps)
     return (
         f"Plan: {plan}. "
-        f"Estimated cost: ${total_cost:.2f} | "
+        f"Estimated cost: {_format_cost(total_cost)} | "
         f"Estimated time: ~{total_latency:.0f} seconds."
     )
 

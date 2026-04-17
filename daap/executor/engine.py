@@ -9,6 +9,7 @@ It works with BuiltNode objects. Only node_builder.py knows about AgentScope.
 """
 
 import asyncio
+import logging
 import time
 from dataclasses import dataclass, field
 
@@ -16,9 +17,40 @@ from agentscope.message import Msg
 
 from daap.executor.node_builder import build_node, BuiltNode
 from daap.executor.patterns import run_execution_step
-from daap.spec.resolver import ResolvedTopology
+from daap.spec.resolver import ResolvedTopology, get_model_pricing
 from daap.tools.registry import get_tool_registry
 from daap.tools.token_tracker import TokenTracker
+
+logger = logging.getLogger(__name__)
+
+
+def _is_rate_limit_error(exc: Exception) -> bool:
+    """
+    Detect 429 / rate-limit errors from OpenAI-compatible clients.
+    Checks typed exceptions first (openai SDK), falls back to string matching.
+    """
+    try:
+        import openai
+        if isinstance(exc, openai.RateLimitError):
+            return True
+        if isinstance(exc, openai.APIStatusError) and exc.status_code == 429:
+            return True
+    except ImportError:
+        pass
+    msg = str(exc).lower()
+    return "429" in msg or "rate limit" in msg or "ratelimit" in msg
+
+
+def _is_server_error(exc: Exception) -> bool:
+    """Detect 5xx server errors from OpenAI-compatible clients."""
+    try:
+        import openai
+        if isinstance(exc, openai.APIStatusError) and exc.status_code >= 500:
+            return True
+    except ImportError:
+        pass
+    msg = str(exc).lower()
+    return any(code in msg for code in ("500", "502", "503", "504"))
 
 
 # ---------------------------------------------------------------------------
@@ -105,9 +137,31 @@ async def execute_topology(
         total_steps = len(resolved.execution_order)
 
         # 4. Walk execution order
+        consecutive_errors: int = 0
+        circuit_breaker_threshold: int = 2
+
         for step_num, step in enumerate(resolved.execution_order, 1):
             step_nodes = [built_nodes[nid] for nid in step]
             max_retries = resolved.constraints.max_retries_per_node
+
+            # --- Global hard cost cap (pre-step check) ---
+            current_spend = exec_tracker.total_cost_usd(get_model_pricing)
+            budget = resolved.constraints.max_cost_usd
+            if current_spend >= budget:
+                return ExecutionResult(
+                    topology_id=resolved.topology_id,
+                    final_output="",
+                    node_results=node_results,
+                    total_latency_seconds=round(time.time() - run_start, 3),
+                    success=False,
+                    error=(
+                        f"Cost limit exceeded before step {step_num}: "
+                        f"spent ${current_spend:.4f} of ${budget:.4f} budget. "
+                        f"Increase max_cost_usd or simplify the topology."
+                    ),
+                    total_input_tokens=exec_tracker.total_input,
+                    total_output_tokens=exec_tracker.total_output,
+                )
 
             # Fire on_node_start for each node in step
             if on_node_start:
@@ -123,18 +177,39 @@ async def execute_topology(
             input_before_step = exec_tracker.total_input
             output_before_step = exec_tracker.total_output
 
-            # Retry wrapper per step
+            # Retry wrapper per step with circuit breaker
             last_exc: Exception | None = None
             for attempt in range(max_retries + 1):
                 try:
-                    # run_execution_step returns {node_id: Msg, ...}
                     step_raw = await run_execution_step(
                         step_nodes, data_store, resolved.edges, initial_msg
                     )
                     last_exc = None
+                    consecutive_errors = 0  # reset on success
                     break
                 except Exception as exc:
                     last_exc = exc
+                    if _is_rate_limit_error(exc) or _is_server_error(exc):
+                        consecutive_errors += 1
+                        logger.warning(
+                            "Retryable API error (consecutive=%d): %s",
+                            consecutive_errors, exc,
+                        )
+                        if consecutive_errors >= circuit_breaker_threshold:
+                            return ExecutionResult(
+                                topology_id=resolved.topology_id,
+                                final_output="",
+                                node_results=node_results,
+                                total_latency_seconds=round(time.time() - run_start, 3),
+                                success=False,
+                                error=(
+                                    f"Circuit breaker open: {consecutive_errors} consecutive "
+                                    f"rate-limit/server errors. API quota likely exceeded. "
+                                    f"Last error: {exc}"
+                                ),
+                                total_input_tokens=exec_tracker.total_input,
+                                total_output_tokens=exec_tracker.total_output,
+                            )
                     if attempt < max_retries:
                         await asyncio.sleep(1)
 
@@ -147,6 +222,8 @@ async def execute_topology(
                     total_latency_seconds=time.time() - run_start,
                     success=False,
                     error=f"Node '{failed_node}' failed after {max_retries} retries: {last_exc}",
+                    total_input_tokens=exec_tracker.total_input,
+                    total_output_tokens=exec_tracker.total_output,
                 )
 
             step_latency = time.time() - step_start
@@ -157,6 +234,16 @@ async def execute_topology(
             n_ran = max(len(nodes_ran), 1)
             step_input_delta = (exec_tracker.total_input - input_before_step) // n_ran
             step_output_delta = (exec_tracker.total_output - output_before_step) // n_ran
+
+            # Per-node token budget warning
+            node_token_budget = resolved.constraints.max_tokens_per_node
+            node_tokens_used = step_input_delta + step_output_delta
+            if node_tokens_used > node_token_budget:
+                logger.warning(
+                    "Step %d exceeded per-node token budget: used %d tokens (budget: %d). "
+                    "Consider reducing max_react_iterations or parallel_instances.",
+                    step_num, node_tokens_used, node_token_budget,
+                )
 
             # Remap node_id keys → data_key keys in data_store
             for nid in step:

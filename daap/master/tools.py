@@ -5,8 +5,8 @@ Both registered via AgentScope Toolkit. The agent calls these instead of
 producing plain text — the API layer uses tool calls as reliable signals,
 not fragile heuristics (no question-mark detection, no guessing).
 
-Module-level state (pragmatic Phase 1 approach):
-  _last_topology_result — set by generate_topology on success
+Module-level state:
+  _topology_result_var  — ContextVar (task-scoped): isolates concurrent sessions
   _pending_questions    — set by ask_user while waiting for user input
   _answer_event         — asyncio.Event signalling when answers arrive
 """
@@ -14,12 +14,13 @@ Module-level state (pragmatic Phase 1 approach):
 import asyncio
 import json
 import uuid
+from contextvars import ContextVar
 from datetime import datetime, timezone
 
 from agentscope.message import TextBlock
 from agentscope.tool import Toolkit, ToolResponse
 
-from daap.spec.estimator import estimate_topology
+from daap.spec.estimator import estimate_topology, _format_cost
 from daap.spec.resolver import resolve_topology
 from daap.spec.schema import TopologySpec
 from daap.spec.validator import validate_topology
@@ -32,10 +33,15 @@ from daap.tools.registry import get_available_tool_names
 
 
 # ---------------------------------------------------------------------------
-# Module-level shared state (Phase 1 — replaced by event bus in Phase 3)
+# Module-level shared state
 # ---------------------------------------------------------------------------
 
-_last_topology_result: dict = {"topology": None, "estimate": None}
+# ContextVar — each asyncio Task (i.e. each session's agent task) gets its own
+# copy, so concurrent sessions never overwrite each other's topology results.
+_topology_result_var: ContextVar[dict] = ContextVar(
+    "daap_topology_result",
+    default={"topology": None, "estimate": None},
+)
 
 _pending_questions: list | None = None
 _answer_event: asyncio.Event | None = None
@@ -44,12 +50,11 @@ _user_answers: list | None = None
 
 def get_last_topology_result() -> dict:
     """API layer calls this to retrieve the most recent validated topology."""
-    return _last_topology_result
+    return _topology_result_var.get()
 
 
 def clear_last_topology_result() -> None:
-    global _last_topology_result
-    _last_topology_result = {"topology": None, "estimate": None}
+    _topology_result_var.set({"topology": None, "estimate": None})
 
 
 def get_pending_questions() -> list | None:
@@ -163,10 +168,10 @@ async def generate_topology(topology_json: str) -> ToolResponse:
         "within_budget": estimate.within_budget,
         "within_timeout": estimate.within_timeout,
     }
-    _last_topology_result = {
+    _topology_result_var.set({
         "topology": topology_dict,
         "estimate": estimate_data,
-    }
+    })
 
     return ToolResponse(
         content=[TextBlock(
@@ -174,9 +179,9 @@ async def generate_topology(topology_json: str) -> ToolResponse:
             text=(
                 f"Topology is valid and ready for execution.\n\n"
                 f"{estimate.user_facing_summary}\n\n"
-                f"Estimated cost: ${estimate.total_cost_usd:.2f}\n"
+                f"Estimated cost: {_format_cost(estimate.total_cost_usd)}\n"
                 f"Estimated time: ~{estimate.total_latency_seconds:.0f} seconds\n"
-                f"Minimum viable cost: ${estimate.min_viable_cost_usd:.2f}\n\n"
+                f"Minimum viable cost: {_format_cost(estimate.min_viable_cost_usd)}\n\n"
                 f"Present this plan and cost estimate to the user. "
                 f"Ask if they want to proceed, want it cheaper, or want changes."
             ),

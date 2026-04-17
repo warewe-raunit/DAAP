@@ -16,6 +16,7 @@ from collections import Counter
 from agentscope.message import Msg
 
 from daap.executor.node_builder import BuiltNode
+from daap.tools.token_tracker import TokenTracker
 
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
@@ -71,6 +72,7 @@ async def consolidate_outputs(
     operator_provider: str = "openrouter",
     operator_base_url: str | None = None,
     operator_api_key_env: str = "OPENROUTER_API_KEY",
+    tracker: TokenTracker | None = None,
 ) -> Msg:
     """
     Merge N parallel outputs into one Msg using the specified strategy.
@@ -108,6 +110,7 @@ async def consolidate_outputs(
             texts, strategy,
             consolidation_model_id,
             operator_provider, operator_base_url, operator_api_key_env,
+            tracker=tracker,
         )
 
     # Unknown strategy — fall back to merge
@@ -133,6 +136,7 @@ async def _llm_consolidate(
     provider: str,
     base_url: str | None,
     api_key_env: str,
+    tracker: TokenTracker | None = None,
 ) -> Msg:
     """
     LLM-based consolidation (deduplicate or rank).
@@ -160,22 +164,23 @@ async def _llm_consolidate(
         )
 
     try:
-        from agentscope.model import OpenAIChatModel
         from agentscope.formatter import OpenAIChatFormatter
+        from daap.executor.tracked_model import TrackedOpenAIChatModel
 
         base_url = base_url or OPENROUTER_BASE_URL
         api_key_env = api_key_env or "OPENROUTER_API_KEY"
 
-        # Prefix bare Claude model IDs with provider namespace for OpenRouter.
+        # Prefix bare model IDs with provider namespace for OpenRouter.
         if "/" not in model_id:
             model_id = f"anthropic/{model_id}"
 
         client_kwargs = {"base_url": base_url} if base_url else None
-        model = OpenAIChatModel(
+        model = TrackedOpenAIChatModel(
             model_name=model_id,
             api_key=os.environ.get(api_key_env, ""),
             client_kwargs=client_kwargs,
             stream=False,
+            tracker=tracker,
         )
         formatter = OpenAIChatFormatter()
 
@@ -252,6 +257,7 @@ async def run_execution_step(
                 built_node.operator_provider,
                 built_node.operator_base_url,
                 built_node.operator_api_key_env,
+                tracker=built_node.tracker,
             )
         else:
             result = outputs[0]
