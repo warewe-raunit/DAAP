@@ -49,7 +49,18 @@ _CANCEL_TEXT_COMMANDS = {
 # ---------------------------------------------------------------------------
 
 def _msg_text(msg: Msg) -> str:
-    return msg.content if isinstance(msg.content, str) else str(msg.content)
+    content = msg.content
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "text":
+                parts.append(block.get("text", ""))
+            elif isinstance(block, str):
+                parts.append(block)
+        return "\n".join(p for p in parts if p).strip()
+    return str(content)
 
 
 def _normalize_text_command(text: str) -> str:
@@ -95,22 +106,26 @@ async def _run_agent_with_question_pump(
     agent_msg = Msg(name="user", content=user_text, role="user")
     agent_task = asyncio.create_task(session.master_agent(agent_msg))
 
-    while not agent_task.done():
-        if session.pending_questions is not None:
-            # Agent is paused waiting for user input
-            await websocket.send_json({
-                "type": "questions",
-                "questions": session.pending_questions,
-            })
+    try:
+        while not agent_task.done():
+            if session.pending_questions is not None:
+                # Agent is paused waiting for user input
+                await websocket.send_json({
+                    "type": "questions",
+                    "questions": session.pending_questions,
+                })
 
-            # Wait for client answer
-            raw = await websocket.receive_text()
-            data = json.loads(raw)
-            if data.get("type") == "answer":
-                session._resolve_answers(data.get("answers", []))
-            # else: unexpected message type — ignore, agent stays paused
+                # Wait for client answer
+                raw = await websocket.receive_text()
+                data = json.loads(raw)
+                if data.get("type") == "answer":
+                    session._resolve_answers(data.get("answers", []))
+                # else: unexpected message type — ignore, agent stays paused
 
-        await asyncio.sleep(0.05)
+            await asyncio.sleep(0.05)
+    except Exception:
+        agent_task.cancel()
+        raise
 
     response_msg = agent_task.result()
     return _msg_text(response_msg)

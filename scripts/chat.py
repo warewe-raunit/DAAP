@@ -75,7 +75,7 @@ YELLOW = "\033[93m"
 RED    = "\033[91m"
 DIM    = "\033[2m"
 
-if not sys.stdout.isatty():
+if not sys.stdout.isatty() or os.environ.get("NO_COLOR"):
     RESET = BOLD = CYAN = GREEN = YELLOW = RED = DIM = ""
 
 _JSON_FENCE_RE = re.compile(r"```(?:json)?\s*([\s\S]*?)```", re.IGNORECASE)
@@ -810,7 +810,16 @@ async def _remote_main(args: argparse.Namespace) -> None:
                     etype = event.get("type")
 
                     if etype == "response":
-                        _print_agent(event.get("content", ""), raw_output=raw_output)
+                        content = event.get("content", "")
+                        # Server may send content as str(list) e.g. "[{'type':'text','text':'...'}]"
+                        # Try ast.literal_eval to recover the structure, then extract text.
+                        if isinstance(content, str) and content.startswith("[{"):
+                            try:
+                                import ast
+                                content = ast.literal_eval(content)
+                            except Exception:
+                                pass
+                        _print_agent(_extract_text(content), raw_output=raw_output)
                         usage = event.get("usage", {})
                         _print_usage(usage)
 
