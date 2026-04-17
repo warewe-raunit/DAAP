@@ -6,7 +6,7 @@
 #   daap <session_id>     → resume specific session
 #   daap --help           → show help
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 VENV="$HOME/.daap-venv"
 CHAT="$SCRIPT_DIR/chat.py"
 PYTHON="$VENV/bin/python3"
