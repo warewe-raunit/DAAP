@@ -339,6 +339,74 @@ def _print_warn(text: str):
 def _print_error(text: str):
     print(f"\n{RED}{text}{RESET}\n")
 
+# ---------------------------------------------------------------------------
+# Rating helpers
+# ---------------------------------------------------------------------------
+
+_RATING_KEYWORDS: dict[int, list[str]] = {
+    1: ["terrible", "awful", "horrible", "useless", "trash", "garbage", "worst", "broken", "disaster"],
+    2: ["bad", "poor", "disappointing", "wrong", "failed", "didn't work", "not good", "mediocre"],
+    3: ["okay", "okayish", "ok", "fine", "alright", "decent", "average", "meh", "so-so", "acceptable", "fair"],
+    4: ["good", "great", "nice", "helpful", "solid", "worked", "well done", "pretty good", "mostly good"],
+    5: ["excellent", "perfect", "amazing", "outstanding", "fantastic", "brilliant", "awesome", "love it", "flawless"],
+}
+
+def _detect_rating_in_text(text: str) -> int | None:
+    """
+    Detect a star rating (1-5) from natural language feedback.
+    Returns rating int or None if no clear signal.
+    """
+    # Explicit /rate N
+    m = re.match(r"^/?\s*rate\s+([1-5])\b", text.strip(), re.IGNORECASE)
+    if m:
+        return int(m.group(1))
+
+    lowered = text.lower()
+    for rating, keywords in sorted(_RATING_KEYWORDS.items(), reverse=True):
+        if any(kw in lowered for kw in keywords):
+            return rating
+    return None
+
+
+async def _submit_rating_local(session, rating: int, comment: str) -> None:
+    """Submit rating directly via internal stores (local mode)."""
+    try:
+        from daap.feedback.store import FeedbackStore
+        FeedbackStore().store_rating(
+            session_id=session.session_id,
+            rating=rating,
+            comment=comment,
+            topology_json=session.pending_topology,
+            execution_result=session.execution_result,
+        )
+    except Exception:
+        pass
+    try:
+        from daap.optimizer.integration import record_run_outcome
+        topo = session.pending_topology or {}
+        nodes = topo.get("nodes", []) or []
+        result = session.execution_result or {}
+        constraints = topo.get("constraints", {}) or {}
+        record_run_outcome(
+            user_id=session.user_id,
+            user_prompt=topo.get("user_prompt", ""),
+            node_configs={n.get("role", ""): n.get("model_tier", "smart") for n in nodes if isinstance(n, dict)},
+            user_rating=rating,
+            actual_cost_usd=float(result.get("cost_usd", 0) or 0),
+            budget_usd=float(constraints.get("max_cost_usd", 0) or 0),
+            latency_seconds=float(result.get("latency_seconds", 0) or 0),
+            timeout_seconds=float(constraints.get("max_latency_seconds", 0) or 0),
+            topology_id=result.get("topology_id"),
+            node_count=len(nodes),
+            has_parallel=any(
+                isinstance(n, dict) and n.get("instance_config", {}).get("parallel_instances", 1) > 1
+                for n in nodes
+            ),
+        )
+    except Exception:
+        pass
+
+
 def _print_plan(topology: dict, estimate: dict, usage: dict):
     nodes = [n.get("node_id") for n in topology.get("nodes", [])]
     cost  = estimate.get("total_cost_usd", 0) if estimate else 0
@@ -788,7 +856,7 @@ async def _remote_main(args: argparse.Namespace) -> None:
 
     _commands = [
         "/help", "/approve", "/cheaper", "/cancel",
-        "/raw", "/clean", "/quit",
+        "/rate", "/raw", "/clean", "/quit",
     ]
     _completer = WordCompleter(_commands, sentence=True)
     _prompt_session: PromptSession = PromptSession(completer=_completer, complete_while_typing=True)
@@ -796,13 +864,31 @@ async def _remote_main(args: argparse.Namespace) -> None:
     ws_endpoint = _ws_url(api_url, f"/ws/{session_id}")
     _print_system(f"Connecting to {ws_endpoint} ...")
 
+    _last_result_received = False   # flag: execution result shown, rating expected
+
+    async def _submit_rating_remote(rating: int, comment: str) -> None:
+        try:
+            async with httpx.AsyncClient(timeout=5) as hc:
+                r = await hc.post(f"{api_url}/rate", json={
+                    "session_id": session_id,
+                    "rating": rating,
+                    "comment": comment,
+                })
+                if r.status_code == 200:
+                    stars = "★" * rating + "☆" * (5 - rating)
+                    _print_system(f"Rated {stars} ({rating}/5). Optimizer updated.")
+                else:
+                    _print_system(f"Rating failed: {r.text}")
+        except Exception as exc:
+            _print_system(f"Rating error: {exc}")
+
     try:
         async with websockets.connect(ws_endpoint, ping_interval=30) as ws:
             _print_system("Connected. Type your message or /help.")
 
             async def _recv_loop():
                 """Background task: receive server events and render them."""
-                nonlocal raw_output
+                nonlocal raw_output, _last_result_received
                 pending_plan: dict | None = None
 
                 async for raw in ws:
@@ -862,6 +948,8 @@ async def _remote_main(args: argparse.Namespace) -> None:
                         models = event.get("models", [])
                         usage = event.get("usage", {})
                         _print_result(output, latency, models, usage)
+                        _last_result_received = True
+                        _print_system("Rate this run: /rate <1-5> [comment]  or just say how it went")
 
                     elif etype == "questions":
                         questions = event.get("questions", [])
@@ -936,6 +1024,36 @@ async def _remote_main(args: argparse.Namespace) -> None:
                     elif cmd == "cancel":
                         await ws.send(json.dumps({"type": "cancel"}))
                         continue
+
+                    elif cmd.startswith("rate"):
+                        parts = user_input.strip().split(None, 2)
+                        rating = None
+                        comment = ""
+                        if len(parts) >= 2 and parts[1].isdigit():
+                            rating = int(parts[1])
+                            comment = parts[2] if len(parts) > 2 else ""
+                        else:
+                            full_text = " ".join(parts[1:]) if len(parts) > 1 else ""
+                            rating = _detect_rating_in_text(full_text)
+                            comment = full_text
+                        if rating is None or not (1 <= rating <= 5):
+                            _print_system("Usage: /rate <1-5> [comment]  or  /rate it was great")
+                        elif not _last_result_received:
+                            _print_system("No execution result to rate yet. Run a topology first.")
+                        else:
+                            await _submit_rating_remote(rating, comment)
+                            _last_result_received = False
+                        continue
+
+                    elif _last_result_received:
+                        detected = _detect_rating_in_text(user_input)
+                        if detected is not None:
+                            await _submit_rating_remote(detected, user_input)
+                            stars = "★" * detected + "☆" * (5 - detected)
+                            _print_system(f"Detected feedback → rated {stars} ({detected}/5). Optimizer updated.")
+                            _print_system("If wrong, use /rate <1-5> to correct.")
+                            _last_result_received = False
+                            continue
 
                     elif cmd == "clear":
                         _save_session(user_id, session_id, [])
@@ -1173,7 +1291,7 @@ async def main(args: argparse.Namespace | None = None):
         "/topology", "/topology load",
         "/profile", "/mcp", "/skills",
         "/skill", "/skill add", "/skill remove", "/skill create",
-        "/clear", "/raw", "/clean", "/quit",
+        "/rate", "/clear", "/raw", "/clean", "/quit",
     ]
     _completer = WordCompleter(_commands, sentence=True)
     _prompt_session: PromptSession = PromptSession(completer=_completer, complete_while_typing=True)
@@ -1423,6 +1541,41 @@ async def main(args: argparse.Namespace | None = None):
                             print(f"  {t.topology_id[:12]}  {ts}  {t.name or '(unnamed)'}")
                         _print_system("Use /topology load <id-prefix> to reload.")
                 continue
+
+            # ------------------------------------------------------------------
+            # /rate command or natural-language rating after execution
+            if cmd.startswith("rate"):
+                parts = user_input.strip().split(None, 2)
+                rating = None
+                comment = ""
+                if len(parts) >= 2 and parts[1].isdigit():
+                    rating = int(parts[1])
+                    comment = parts[2] if len(parts) > 2 else ""
+                else:
+                    # natural language: "/rate the topology was okayish"
+                    full_text = " ".join(parts[1:]) if len(parts) > 1 else ""
+                    rating = _detect_rating_in_text(full_text)
+                    comment = full_text
+
+                if rating is None or not (1 <= rating <= 5):
+                    _print_system("Usage: /rate <1-5> [comment]  or  /rate it was great")
+                elif getattr(session, "execution_result", None) is None:
+                    _print_system("No execution result to rate yet. Run a topology first.")
+                else:
+                    await _submit_rating_local(session, rating, comment)
+                    stars = "★" * rating + "☆" * (5 - rating)
+                    _print_system(f"Rated {stars} ({rating}/5). Optimizer updated.")
+                continue
+
+            # Natural language rating detection after execution result
+            if getattr(session, "execution_result", None) is not None:
+                detected = _detect_rating_in_text(user_input)
+                if detected is not None:
+                    await _submit_rating_local(session, detected, user_input)
+                    stars = "★" * detected + "☆" * (5 - detected)
+                    _print_system(f"Detected feedback → rated {stars} ({detected}/5). Optimizer updated.")
+                    _print_system("If wrong, use /rate <1-5> to correct.")
+                    continue
 
             # ------------------------------------------------------------------
             # Normal message to agent
