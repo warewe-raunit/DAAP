@@ -5,14 +5,21 @@ Usage:
     python scripts/chat.py [--raw-output]
 
 Commands during chat:
-    raw          — show raw model output (including JSON)
-    clean        — hide raw JSON/code blocks (default)
-    help         — show command help
-    approve      — approve latest topology plan
-    cheaper      — ask agent to make topology cheaper
-    cancel       — cancel pending topology
-    skill        — manage skills (/skill add|remove|create)
-    quit / exit  — end session
+    /help        — show command help
+    /approve     — approve latest topology plan
+    /cheaper     — ask agent to make topology cheaper
+    /cancel      — cancel pending topology
+    /history     — list saved topologies
+    /topology    — list topologies; /topology load <id> to reload one
+    /memory      — list profile facts; search/delete subcommands
+    /clear       — clear conversation history (start fresh)
+    /profile     — show user profile + optimizer summary
+    /mcp         — show connected MCP servers and tools
+    /skills      — list registered skills
+    /skill       — manage skills (add|remove|create)
+    /raw         — show raw model output (including JSON)
+    /clean       — hide raw JSON/code blocks (default)
+    /quit        — end session
 
 Requires: OPENROUTER_API_KEY in .env or environment.
 """
@@ -20,12 +27,14 @@ Requires: OPENROUTER_API_KEY in .env or environment.
 import argparse
 import asyncio
 import json
+import pathlib
 import re
 import shlex
 import shutil
 import sys
 import os
 import textwrap
+import time
 
 # Force UTF-8 output — prevents cp1252 crash on Windows
 if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
@@ -85,7 +94,7 @@ def _print_header(raw_output: bool):
     mode = "RAW" if raw_output else "CLEAN"
     print(f"\n{BOLD}DAAP CLI{RESET} {DIM}[{mode} mode]{RESET}")
     print(f"{DIM}{'-' * min(_terminal_width(), 100)}{RESET}")
-    print(f"{DIM}Commands: /help /approve /cheaper /cancel /mcp /skills /skill /profile /raw /clean /quit{RESET}\n")
+    print(f"{DIM}Commands: /help /approve /cheaper /cancel /history /memory /topology /mcp /skills /skill /profile /raw /clean /quit{RESET}\n")
 
 
 def _print_wrapped(text: str, indent: int = 2):
@@ -220,6 +229,34 @@ def _close_memory_client(daap_memory) -> None:
             close_fn()
         except Exception:
             pass
+
+
+# ---------------------------------------------------------------------------
+# Session persistence
+# ---------------------------------------------------------------------------
+
+def _session_file(user_id: str) -> pathlib.Path:
+    p = pathlib.Path.home() / ".daap" / "sessions" / user_id
+    p.mkdir(parents=True, exist_ok=True)
+    return p / "last.json"
+
+
+def _save_session(user_id: str, conversation: list[dict]) -> None:
+    try:
+        _session_file(user_id).write_text(
+            json.dumps({"saved_at": time.time(), "conversation": conversation}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+    except Exception:
+        pass
+
+
+def _load_session(user_id: str) -> list[dict]:
+    try:
+        data = json.loads(_session_file(user_id).read_text(encoding="utf-8"))
+        return data.get("conversation", [])
+    except Exception:
+        return []
 
 
 def _print_agent(text: str, raw_output: bool):
@@ -374,7 +411,7 @@ async def _handle_ask_user(session: Session) -> None:
         else:
             print(f"    {DIM}Your answer:{RESET} ", end="", flush=True)
 
-        raw = await asyncio.get_event_loop().run_in_executor(None, input, "")
+        raw = await asyncio.get_running_loop().run_in_executor(None, input, "")
         raw = raw.strip()
 
         # If numeric, map to option label
@@ -577,6 +614,38 @@ def _handle_skill_command(raw_input: str, print_fn) -> None:
 
 
 # ---------------------------------------------------------------------------
+# CLI progress callback (replaces WebSocket progress for terminal)
+# ---------------------------------------------------------------------------
+
+def _make_cli_progress_send():
+    """Return an async callable that prints node progress to the terminal."""
+    async def _send(event: dict) -> None:
+        etype = event.get("type")
+        if etype == "executing":
+            total = event.get("total_nodes", "?")
+            print(f"{DIM}  [executing {total} nodes]{RESET}", flush=True)
+        elif etype == "progress":
+            ev = event.get("event", "")
+            node_id = event.get("node_id", "?")
+            done = event.get("completed_nodes", 0)
+            total = event.get("total_nodes", 0)
+            bar_width = 20
+            filled = int((done / total) * bar_width) if total else 0
+            bar = "█" * filled + "░" * (bar_width - filled)
+            if ev == "node_start":
+                print(f"\r{DIM}  [{bar}] {done}/{total}  running: {node_id}{RESET}    ", end="", flush=True)
+            elif ev == "node_complete":
+                done_now = done
+                filled_now = int((done_now / total) * bar_width) if total else 0
+                bar_now = "█" * filled_now + "░" * (bar_width - filled_now)
+                if done_now >= total:
+                    print(f"\r{DIM}  [{bar_now}] {done_now}/{total}  done{RESET}          ", flush=True)
+                else:
+                    print(f"\r{DIM}  [{bar_now}] {done_now}/{total}  done: {node_id}{RESET}    ", end="", flush=True)
+    return _send
+
+
+# ---------------------------------------------------------------------------
 # Main chat loop
 # ---------------------------------------------------------------------------
 
@@ -590,13 +659,22 @@ async def main():
 
     # Resolve user identity (first-run prompt or load saved)
     is_new_user = load_local_user() is None
-    user_id = await asyncio.get_event_loop().run_in_executor(None, resolve_cli_user)
+    user_id = await asyncio.get_running_loop().run_in_executor(None, resolve_cli_user)
 
     # Init session
     session_mgr = SessionManager()
     topology_store = TopologyStore()
     session = session_mgr.create_session(user_id=user_id)
     session.token_tracker = TokenTracker()
+
+    # Restore previous conversation if available
+    prior_conversation = _load_session(user_id)
+    if prior_conversation:
+        session.conversation = prior_conversation
+        _print_system(f"Session restored ({len(prior_conversation)} messages)")
+
+    # CLI progress — mirrors WebSocket progress events in terminal
+    session._ws_send = _make_cli_progress_send()
 
     if not is_new_user:
         profile_facts: list[str] = []
@@ -684,7 +762,7 @@ async def main():
             # Get user input
             try:
                 print(f"{BOLD}You:{RESET} ", end="", flush=True)
-                user_input = await asyncio.get_event_loop().run_in_executor(None, input, "")
+                user_input = await asyncio.get_running_loop().run_in_executor(None, input, "")
                 user_input = user_input.strip()
             except (EOFError, KeyboardInterrupt):
                 print("\nBye!")
@@ -702,7 +780,7 @@ async def main():
                 break
 
             if cmd == "help":
-                _print_system("Commands: /help /approve /cheaper /cancel /mcp /skills /skill /profile /raw /clean /quit")
+                _print_system("Commands: /help /approve /cheaper /cancel /history /memory /topology /mcp /skills /skill /profile /raw /clean /quit")
                 continue
 
             if cmd == "raw":
@@ -725,6 +803,12 @@ async def main():
                 session.pending_topology = None
                 session.pending_estimate = None
                 _print_system("Topology cancelled.")
+                continue
+
+            if cmd == "clear":
+                session.conversation = []
+                _save_session(user_id, [])
+                _print_system("Conversation history cleared.")
                 continue
 
             if cmd == "mcp":
@@ -800,6 +884,111 @@ async def main():
                     _print_system("Memory: unavailable")
                 continue
 
+            if cmd == "history":
+                topos = topology_store.list_topologies(user_id)
+                if not topos:
+                    _print_system("No topologies saved yet.")
+                else:
+                    _print_system(f"Saved topologies ({len(topos)}):")
+                    for t in topos[:10]:
+                        import datetime
+                        ts = datetime.datetime.fromtimestamp(t.updated_at).strftime("%Y-%m-%d %H:%M")
+                        runs = topology_store.get_runs(t.topology_id, limit=1)
+                        run_label = f"{len(runs)} run{'s' if len(runs) != 1 else ''}" if runs else "no runs"
+                        print(f"  {t.topology_id[:12]}  {ts}  {t.name or '(unnamed)'}  [{run_label}]")
+                    _print_system("Use /topology load <id> to reload one.")
+                continue
+
+            if cmd.startswith("memory"):
+                parts = cmd.split(None, 2)
+                sub = parts[1] if len(parts) > 1 else ""
+                try:
+                    from daap.memory.config import check_memory_available, get_memory_client
+                    from daap.memory.scopes import profile_scope
+                    ok, reason = check_memory_available()
+                    if not ok:
+                        _print_system(f"Memory unavailable: {reason}")
+                    elif sub == "search" and len(parts) > 2:
+                        from daap.memory.reader import search_user_profile
+                        results = search_user_profile(user_id, parts[2])
+                        if results:
+                            _print_system(f"Memory search '{parts[2]}' ({len(results)} results):")
+                            for i, f in enumerate(results, 1):
+                                print(f"  {i}. {f}")
+                        else:
+                            _print_system("No matching facts found.")
+                    elif sub == "delete" and len(parts) > 2:
+                        idx_str = parts[2].strip()
+                        if not idx_str.isdigit():
+                            _print_system("Usage: /memory delete <number>  (use /memory to list)")
+                        else:
+                            idx = int(idx_str) - 1
+                            client = get_memory_client()
+                            result = client.get_all(**profile_scope(user_id), limit=50)
+                            items = result.get("results", [])
+                            if idx < 0 or idx >= len(items):
+                                _print_system(f"No fact #{idx + 1}. Use /memory to list.")
+                            else:
+                                mem_id = items[idx]["id"]
+                                client.delete(mem_id)
+                                _print_system(f"Deleted: {items[idx]['memory']}")
+                    elif sub == "clear":
+                        confirm = await asyncio.get_running_loop().run_in_executor(None, input, "Delete ALL memory facts? [y/N]: ")
+                        if confirm.strip().lower() == "y":
+                            client = get_memory_client()
+                            result = client.get_all(**profile_scope(user_id), limit=200)
+                            for m in result.get("results", []):
+                                try:
+                                    client.delete(m["id"])
+                                except Exception:
+                                    pass
+                            _print_system("All profile facts deleted.")
+                        else:
+                            _print_system("Cancelled.")
+                    else:
+                        # Default: list all
+                        client = get_memory_client()
+                        result = client.get_all(**profile_scope(user_id), limit=50)
+                        items = result.get("results", [])
+                        if not items:
+                            _print_system("No memory facts stored.")
+                            _print_system("Usage: /memory search <query> | /memory delete <n> | /memory clear")
+                        else:
+                            _print_system(f"Memory facts ({len(items)}):")
+                            for i, m in enumerate(items, 1):
+                                print(f"  {i}. {m['memory']}")
+                            _print_system("Usage: /memory search <query> | /memory delete <n> | /memory clear")
+                except Exception as exc:
+                    _print_system(f"Memory error: {exc}")
+                continue
+
+            if cmd.startswith("topology"):
+                parts = cmd.split(None, 2)
+                sub = parts[1] if len(parts) > 1 else ""
+                if sub == "load" and len(parts) > 2:
+                    topo_id_prefix = parts[2].strip()
+                    topos = topology_store.list_topologies(user_id)
+                    match = next((t for t in topos if t.topology_id.startswith(topo_id_prefix)), None)
+                    if not match:
+                        _print_system(f"Topology not found: {topo_id_prefix}")
+                    else:
+                        session.pending_topology = match.spec
+                        session.pending_estimate = None
+                        _print_system(f"Loaded: {match.name or match.topology_id}")
+                        _print_system("Use /approve to execute, or chat to modify.")
+                else:
+                    topos = topology_store.list_topologies(user_id)
+                    if not topos:
+                        _print_system("No topologies saved yet.")
+                    else:
+                        _print_system(f"Saved topologies ({len(topos)}):")
+                        for t in topos[:10]:
+                            import datetime
+                            ts = datetime.datetime.fromtimestamp(t.updated_at).strftime("%Y-%m-%d %H:%M")
+                            print(f"  {t.topology_id[:12]}  {ts}  {t.name or '(unnamed)'}")
+                        _print_system("Use /topology load <id-prefix> to reload.")
+                continue
+
             # ------------------------------------------------------------------
             # Normal message to agent
             clear_last_topology_result()
@@ -829,6 +1018,7 @@ async def main():
                 _print_agent(response_text, raw_output=raw_output)
                 _print_usage(usage)
     finally:
+        _save_session(user_id, session.conversation)
         _close_memory_client(daap_memory)
         if mcp_manager:
             try:
