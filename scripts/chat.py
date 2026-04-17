@@ -48,6 +48,10 @@ from daap.env import load_project_env
 
 load_project_env()
 
+from prompt_toolkit import PromptSession
+from prompt_toolkit.completion import WordCompleter
+from prompt_toolkit.patch_stdout import patch_stdout
+
 from agentscope.message import Msg
 from daap.api.sessions import Session, SessionManager, create_session_scoped_toolkit
 from daap.identity import load_local_user, resolve_cli_user
@@ -757,12 +761,23 @@ async def main():
     except Exception:
         pass
 
+    _commands = [
+        "/help", "/approve", "/cheaper", "/cancel",
+        "/history", "/memory", "/memory search", "/memory delete", "/memory clear",
+        "/topology", "/topology load",
+        "/profile", "/mcp", "/skills",
+        "/skill", "/skill add", "/skill remove", "/skill create",
+        "/clear", "/raw", "/clean", "/quit",
+    ]
+    _completer = WordCompleter(_commands, sentence=True)
+    _prompt_session: PromptSession = PromptSession(completer=_completer, complete_while_typing=True)
+
     try:
         while True:
             # Get user input
             try:
-                print(f"{BOLD}You:{RESET} ", end="", flush=True)
-                user_input = await asyncio.get_running_loop().run_in_executor(None, input, "")
+                with patch_stdout():
+                    user_input = await _prompt_session.prompt_async(f"You: ")
                 user_input = user_input.strip()
             except (EOFError, KeyboardInterrupt):
                 print("\nBye!")
