@@ -9,6 +9,7 @@ Commands during chat:
     /approve     — approve latest topology plan
     /cheaper     — ask agent to make topology cheaper
     /cancel      — cancel pending topology
+    /sessions    — list all saved sessions (resume with --session <id>)
     /history     — list saved topologies
     /topology    — list topologies; /topology load <id> to reload one
     /memory      — list profile facts; search/delete subcommands
@@ -85,6 +86,12 @@ def _parse_args() -> argparse.Namespace:
         "--raw-output",
         action="store_true",
         help="Show raw model output (including JSON blobs and fenced blocks).",
+    )
+    parser.add_argument(
+        "--session", "-s",
+        metavar="SESSION_ID",
+        default=None,
+        help="Resume a previous session by ID (e.g. python chat.py --session abc123).",
     )
     return parser.parse_args()
 
@@ -239,26 +246,69 @@ def _close_memory_client(daap_memory) -> None:
 # Session persistence
 # ---------------------------------------------------------------------------
 
-def _session_file(user_id: str) -> pathlib.Path:
+def _sessions_dir(user_id: str) -> pathlib.Path:
     p = pathlib.Path.home() / ".daap" / "sessions" / user_id
     p.mkdir(parents=True, exist_ok=True)
-    return p / "last.json"
+    return p
 
 
-def _save_session(user_id: str, conversation: list[dict]) -> None:
+def _save_session(user_id: str, session_id: str, conversation: list[dict]) -> None:
     try:
-        _session_file(user_id).write_text(
-            json.dumps({"saved_at": time.time(), "conversation": conversation}, ensure_ascii=False),
-            encoding="utf-8",
+        d = _sessions_dir(user_id)
+        payload = json.dumps(
+            {"session_id": session_id, "saved_at": time.time(), "conversation": conversation},
+            ensure_ascii=False,
         )
+        # Write named file + update "last" pointer
+        (d / f"{session_id}.json").write_text(payload, encoding="utf-8")
+        (d / "last.json").write_text(payload, encoding="utf-8")
     except Exception:
         pass
 
 
-def _load_session(user_id: str) -> list[dict]:
+def _load_session(user_id: str, session_id: str | None = None) -> tuple[str | None, list[dict]]:
+    """Return (session_id, conversation). session_id=None if nothing found."""
     try:
-        data = json.loads(_session_file(user_id).read_text(encoding="utf-8"))
-        return data.get("conversation", [])
+        d = _sessions_dir(user_id)
+        if session_id:
+            # Try exact match first, then prefix match
+            exact = d / f"{session_id}.json"
+            if exact.exists():
+                f = exact
+            else:
+                matches = sorted(d.glob(f"{session_id}*.json"))
+                matches = [m for m in matches if m.name != "last.json"]
+                if not matches:
+                    return None, []
+                f = matches[0]
+        else:
+            f = d / "last.json"
+            if not f.exists():
+                return None, []
+        data = json.loads(f.read_text(encoding="utf-8"))
+        return data.get("session_id"), data.get("conversation", [])
+    except Exception:
+        return None, []
+
+
+def _list_sessions(user_id: str) -> list[dict]:
+    """List all saved sessions for a user, newest first."""
+    try:
+        d = _sessions_dir(user_id)
+        sessions = []
+        for f in d.glob("*.json"):
+            if f.name == "last.json":
+                continue
+            try:
+                data = json.loads(f.read_text(encoding="utf-8"))
+                sessions.append({
+                    "session_id": data.get("session_id", f.stem),
+                    "saved_at": data.get("saved_at", 0),
+                    "messages": len(data.get("conversation", [])),
+                })
+            except Exception:
+                pass
+        return sorted(sessions, key=lambda s: s["saved_at"], reverse=True)
     except Exception:
         return []
 
@@ -671,11 +721,14 @@ async def main():
     session = session_mgr.create_session(user_id=user_id)
     session.token_tracker = TokenTracker()
 
-    # Restore previous conversation if available
-    prior_conversation = _load_session(user_id)
+    # Restore previous conversation if --session given, else auto-load last
+    resume_id = args.session
+    restored_id, prior_conversation = _load_session(user_id, resume_id)
     if prior_conversation:
         session.conversation = prior_conversation
-        _print_system(f"Session restored ({len(prior_conversation)} messages)")
+        _print_system(f"Session resumed: {restored_id}  ({len(prior_conversation)} messages)")
+    elif resume_id:
+        _print_warn(f"Session '{resume_id}' not found. Starting fresh.")
 
     # CLI progress — mirrors WebSocket progress events in terminal
     session._ws_send = _make_cli_progress_send()
@@ -746,6 +799,7 @@ async def main():
         pass
     from daap.spec.resolver import MODEL_REGISTRY
     _print_system(f"Session {session.session_id} ready | Master: {MODEL_REGISTRY['powerful']}")
+    _print_system(f"Resume later: python scripts/chat.py --session {session.session_id}")
     try:
         from daap.skills.manager import get_skill_manager
 
@@ -763,7 +817,8 @@ async def main():
 
     _commands = [
         "/help", "/approve", "/cheaper", "/cancel",
-        "/history", "/memory", "/memory search", "/memory delete", "/memory clear",
+        "/sessions", "/history",
+        "/memory", "/memory search", "/memory delete", "/memory clear",
         "/topology", "/topology load",
         "/profile", "/mcp", "/skills",
         "/skill", "/skill add", "/skill remove", "/skill create",
@@ -822,7 +877,7 @@ async def main():
 
             if cmd == "clear":
                 session.conversation = []
-                _save_session(user_id, [])
+                _save_session(user_id, session.session_id, [])
                 _print_system("Conversation history cleared.")
                 continue
 
@@ -897,6 +952,20 @@ async def main():
                         _print_system("Memory: no facts stored yet")
                 except Exception:
                     _print_system("Memory: unavailable")
+                continue
+
+            if cmd == "sessions":
+                saved = _list_sessions(user_id)
+                if not saved:
+                    _print_system("No saved sessions.")
+                else:
+                    import datetime
+                    _print_system(f"Saved sessions ({len(saved)}):")
+                    for s in saved[:10]:
+                        ts = datetime.datetime.fromtimestamp(s["saved_at"]).strftime("%Y-%m-%d %H:%M")
+                        active = " ← current" if s["session_id"] == session.session_id else ""
+                        print(f"  {s['session_id']}  {ts}  ({s['messages']} messages){active}")
+                    _print_system("Resume: python scripts/chat.py --session <id>")
                 continue
 
             if cmd == "history":
@@ -1033,7 +1102,7 @@ async def main():
                 _print_agent(response_text, raw_output=raw_output)
                 _print_usage(usage)
     finally:
-        _save_session(user_id, session.conversation)
+        _save_session(user_id, session.session_id, session.conversation)
         _close_memory_client(daap_memory)
         if mcp_manager:
             try:
