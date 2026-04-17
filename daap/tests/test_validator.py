@@ -209,6 +209,22 @@ def test_mcp_tool_valid_format():
     assert not tool_errors, f"Valid MCP tool should not fail: {result.error_summary}"
 
 
+def test_mcp_tool_with_explicit_tool_name_valid_format():
+    tools = AVAILABLE_TOOLS | {"mcp://linkedin/search_people"}
+    nodes = [{
+        **minimal_node("node_a"),
+        "tools": [{"name": "mcp://linkedin/search_people"}],
+        "agent_mode": "react",
+    }]
+    topo = minimal_topology(nodes)
+    result = validate_topology(topo, tools, AVAILABLE_MODELS)
+    tool_errors = [
+        e for e in result.errors
+        if e.category == "tool" and "mcp://linkedin/search_people" in e.message
+    ]
+    assert not tool_errors, f"Valid MCP tool should not fail: {result.error_summary}"
+
+
 def test_mcp_tool_malformed():
     nodes = [{**minimal_node("node_a"), "tools": [{"name": "mcp://"}], "agent_mode": "react"}]
     topo = minimal_topology(nodes)

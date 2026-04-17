@@ -69,24 +69,24 @@ def _build_model_and_formatter(
         base_url = operator_config.get("base_url")
         api_key_env = operator_config.get("api_key_env", "OPENROUTER_API_KEY")
         model_id = operator_config.get("model_map", {}).get(
-            "smart", OPENROUTER_MASTER_MODEL
+            "powerful", OPENROUTER_MASTER_MODEL
         )
 
         base_url = base_url or OPENROUTER_BASE_URL
         if "/" not in model_id:
             model_id = f"anthropic/{model_id}"
 
-        client_args = {"base_url": base_url} if base_url else {}
+        client_kwargs = {"base_url": base_url} if base_url else {}
     else:
         # Default: OpenRouter
         api_key_env = "OPENROUTER_API_KEY"
         model_id = OPENROUTER_MASTER_MODEL
-        client_args = {"base_url": OPENROUTER_BASE_URL}
+        client_kwargs = {"base_url": OPENROUTER_BASE_URL}
 
     model = TrackedOpenAIChatModel(
         model_name=model_id,
         api_key=os.environ.get(api_key_env, ""),
-        client_args=client_args,
+        client_kwargs=client_kwargs,
         stream=False,
         tracker=tracker,
     )

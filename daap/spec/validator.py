@@ -307,12 +307,12 @@ def _validate_resources(
 
         resolved = resolve_topology(topology)
         if isinstance(resolved, list):
-            for re in resolved:
+            for res_err in resolved:
                 errors.append(ValidationError(
                     category="resource",
-                    node_id=re.node_id,
-                    message=f"Resolution failed for '{re.field}': {re.message}",
-                    suggestion=f"Fix abstract name '{re.abstract_name}'.",
+                    node_id=res_err.node_id,
+                    message=f"Resolution failed for '{res_err.field}': {res_err.message}",
+                    suggestion=f"Fix abstract name '{res_err.abstract_name}'.",
                 ))
         else:
             estimate = estimate_topology(resolved)
@@ -368,7 +368,7 @@ def _validate_resources(
 # Category 4: Tool Validation
 # ---------------------------------------------------------------------------
 
-_MCP_PATTERN = re.compile(r"^mcp://[a-zA-Z0-9_\-]+$")
+_MCP_PATTERN = re.compile(r"^mcp://[a-zA-Z0-9_\-]+(?:/[a-zA-Z0-9_.\-]+)?$")
 
 
 def _validate_tools(
@@ -389,7 +389,11 @@ def _validate_tools(
                         category="tool",
                         node_id=node.node_id,
                         message=f"Malformed MCP tool reference '{name}'",
-                        suggestion="Expected format: mcp://service_name (alphanumeric, hyphens, underscores only).",
+                        suggestion=(
+                            "Expected format: mcp://service_name or "
+                            "mcp://service_name/tool_name "
+                            "(alphanumeric, hyphens, underscores, dots in tool_name)."
+                        ),
                     ))
                     continue
 

@@ -32,20 +32,47 @@ def get_master_system_prompt(
         available_tools = get_available_tool_names()
 
     schema = get_topology_json_schema()
-    tools_list = ", ".join(sorted(available_tools))
+
+    # Split MCP tools from built-ins for separate display
+    builtin_tools = {t for t in available_tools if not t.startswith("mcp://")}
+    mcp_tools = sorted(t for t in available_tools if t.startswith("mcp://"))
+    tools_list = ", ".join(sorted(builtin_tools))
 
     context_section = ""
     if user_context:
-        context_section = f"""
+        if isinstance(user_context, str):
+            context_section = user_context
+        else:
+            context_section = f"""
 ## User Context (from past interactions)
 {json.dumps(user_context, indent=2)}
 Use this to personalize your responses and any topologies you design.
 """
 
+    mcp_section = ""
+    if mcp_tools:
+        mcp_lines = "\n".join(f"- `{t}`" for t in mcp_tools)
+        mcp_section = f"""
+## MCP Tools Available
+
+These tools come from connected MCP servers. Use them in node `tools` arrays with a DAAP MCP tool ID.
+
+Preferred format: `mcp://server_name/tool_name`
+Backward-compatible alias: `mcp://server_name` (only when a default tool is configured, or the server exposes exactly one tool).
+
+{mcp_lines}
+"""
+
+    skill_hint = """
+## Skills
+
+If the user mentions a file path that looks like a skill directory (for example, `/path/to/skill` or `./my-skill`), call `register_skill` with that path to wire it up immediately. Do not ask the user to run a command.
+"""
+
     return f"""You are the DAAP Master Agent, an expert AI assistant for B2B sales automation.
 
 You help founders, VPs of sales, and operators automate sales workflows: lead generation, qualification, personalization, cold outreach, and follow-up sequences.
-{context_section}
+{context_section}{mcp_section}{skill_hint}
 ## Core Operating Contract
 
 - You are a conversational, tool-using orchestrator.
@@ -89,7 +116,8 @@ Do not call `generate_topology` for simple one-shot tasks.
 ## Topology Design Rules (When Calling generate_topology)
 
 Available tools for agents: {tools_list}
-MCP tools use the format: `mcp://service_name` (example: `mcp://linkedin`).
+MCP tools use the format: `mcp://service_name/tool_name` (example: `mcp://linkedin/search_people`).
+`mcp://service_name` is an alias only when the server has a configured default tool or exactly one tool.
 
 Model tiers — pick the right tier per node (cost shown per 1M tokens):
 - "fast":     Gemini 2.5 Flash Lite ($0.10 in / $0.40 out) — search, extract, format, tool-heavy nodes

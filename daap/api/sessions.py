@@ -16,7 +16,10 @@ from dataclasses import dataclass, field
 from agentscope.message import TextBlock
 from agentscope.tool import Toolkit, ToolResponse
 
-from daap.master.tools import generate_topology as generate_topology_tool
+from daap.master.tools import (
+    generate_topology as generate_topology_tool,
+    register_skill as register_skill_tool,
+)
 from daap.skills.manager import apply_configured_skills
 
 logger = logging.getLogger(__name__)
@@ -256,6 +259,7 @@ def create_session_scoped_toolkit(
     session._resolve_answers = resolve_answers
 
     toolkit.register_tool_function(ask_user)
+    toolkit.register_tool_function(register_skill_tool)
 
     async def get_execution_status() -> ToolResponse:
         """Check the status of the current or most recent topology execution.
@@ -573,7 +577,7 @@ def create_session_scoped_toolkit(
                 })
                 if ws_send:
                     import asyncio
-                    asyncio.get_event_loop().create_task(ws_send({
+                    asyncio.get_running_loop().create_task(ws_send({
                         "type": "progress",
                         "event": "node_start",
                         "topology_id": topo_id,
@@ -615,7 +619,7 @@ def create_session_scoped_toolkit(
                         pass
                 if ws_send:
                     import asyncio
-                    asyncio.get_event_loop().create_task(ws_send({
+                    asyncio.get_running_loop().create_task(ws_send({
                         "type": "progress",
                         "event": "node_complete",
                         "topology_id": topo_id,
@@ -649,17 +653,21 @@ def create_session_scoped_toolkit(
             # Write run summary to memory (non-fatal, always — not gated on success)
             if daap_memory is not None:
                 try:
-                    result_dict = {
-                        "topology_id": result.topology_id,
-                        "success": result.success,
-                        "error": result.error,
-                        "total_latency_seconds": result.total_latency_seconds,
-                        "total_cost_usd": 0,  # cost tracked via token_tracker
-                    }
-                    daap_memory.remember_run(
+                    from daap.memory.writer import (
+                        write_run_to_memory,
+                        write_agent_learnings_from_run,
+                    )
+                    topology_summary = topo_dict.get("user_prompt", "topology run")[:120]
+                    write_run_to_memory(
+                        memory=daap_memory,
                         user_id=session.user_id,
-                        topology=topo_dict,
-                        execution_result=result_dict,
+                        topology_summary=topology_summary,
+                        execution_result=result,
+                    )
+                    write_agent_learnings_from_run(
+                        memory=daap_memory,
+                        execution_result=result,
+                        topology_nodes=topo_dict.get("nodes", []),
                     )
                 except Exception as _mem_exc:
                     logger.warning("Memory write failed (non-fatal): %s", _mem_exc)

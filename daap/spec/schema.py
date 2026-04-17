@@ -104,7 +104,7 @@ class OperatorConfig(BaseModel):
 
 class ToolBinding(BaseModel):
     """Abstract tool reference. Resolver maps to concrete tool instance."""
-    name: str  # e.g. "WebSearch", "WebFetch", "mcp://linkedin"
+    name: str  # e.g. "WebSearch", "WebFetch", "mcp://linkedin/search_people"
 
 
 class IOSchema(BaseModel):

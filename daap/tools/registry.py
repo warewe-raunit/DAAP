@@ -225,14 +225,43 @@ _ABSTRACT_TO_RESOLVED: dict[str, str] = {
     "CodeExecution": "agentscope.tools.CodeExecution",
 }
 
+# Backward-compatible MCP placeholders so topology generation remains stable
+# even when no MCP servers are connected at startup.
+_MCP_PLACEHOLDER_TOOLS: set[str] = {"mcp://linkedin", "mcp://crunchbase"}
+
+
+def _get_mcp_manager_safe():
+    """Return MCP manager when available, otherwise None (never raises)."""
+    try:
+        from daap.mcpx.manager import get_mcp_manager
+        return get_mcp_manager()
+    except Exception:
+        return None
+
 
 def get_tool_registry() -> dict[str, callable]:
     """Returns resolved_tool_id → async function mapping."""
-    return dict(_TOOL_REGISTRY)
+    registry = dict(_TOOL_REGISTRY)
+
+    mcp_manager = _get_mcp_manager_safe()
+    if mcp_manager is not None:
+        try:
+            registry.update(mcp_manager.get_tool_registry_entries())
+        except Exception:
+            pass
+
+    return registry
 
 
 def get_available_tool_names() -> set[str]:
     """Returns abstract tool names for the validator and master agent prompt."""
-    abstract = set(_ABSTRACT_TO_RESOLVED.keys())
-    mcp_tools = {"mcp://linkedin", "mcp://crunchbase", "mcp://twitter"}
-    return abstract | mcp_tools
+    names = set(_ABSTRACT_TO_RESOLVED.keys()) | set(_MCP_PLACEHOLDER_TOOLS)
+
+    mcp_manager = _get_mcp_manager_safe()
+    if mcp_manager is not None:
+        try:
+            names.update(mcp_manager.get_available_tool_names())
+        except Exception:
+            pass
+
+    return names

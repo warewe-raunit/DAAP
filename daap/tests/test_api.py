@@ -287,6 +287,7 @@ def test_session_scoped_toolkit_has_core_tools():
     registered = set(toolkit.tools.keys())
     assert "generate_topology" in registered
     assert "ask_user" in registered
+    assert "register_skill" in registered
     assert "get_execution_status" in registered
 
 

@@ -6,6 +6,10 @@ Run with:
 """
 
 import uvicorn
+
+from daap.env import load_project_env
+
+load_project_env()
 from daap.api.routes import app  # noqa: F401 — re-exported for uvicorn
 
 if __name__ == "__main__":

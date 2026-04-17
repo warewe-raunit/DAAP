@@ -28,6 +28,7 @@ Execution Engine
 - **DAG execution engine** — parallel node groups, topological sort, per-node token tracking
 - **Agent modes** — `react` (iterative tool loop) or `single` (one LLM call)
 - **Tool registry** — WebSearch, WebFetch, ReadFile, WriteFile, CodeExecution; MCP tool format ready (`mcp://service`)
+- **AgentScope Skills** — optional skill packs (`SKILL.md`) auto-loaded for master/subagents via config
 - **Topology persistence** — save, version, rename, rerun, soft-delete topologies per user (SQLite)
 - **Run history** — per-topology run log, capped at `max_runs`
 - **REST API** — 11 endpoints under `/api/v1/topologies/`
@@ -61,6 +62,20 @@ export OPENROUTER_API_KEY=your_key_here
 
 # CLI chat
 python scripts/chat.py
+# Optional: show raw model payloads (JSON/code blocks)
+python scripts/chat.py --raw-output
+
+# Optional: AgentScope skills config
+# Create ~/.daap/skills.json, then restart CLI/API
+# {
+#   "skills": [
+#     {"dir": "C:/path/to/skill-a", "targets": ["master"]},
+#     {"dir": "C:/path/to/skill-b", "targets": ["subagent"]},
+#     {"dir": "C:/path/to/skill-c", "targets": ["all"]}
+#   ]
+# }
+# Skills are also auto-discovered from ~/.daap/skills/ and ./skills/
+# Optional override path: set DAAP_SKILLS_CONFIG_PATH=/custom/path/skills.json
 
 # REST + WebSocket API
 uvicorn daap.main:app --reload --port 8000
@@ -80,12 +95,31 @@ daap/
 ├── feedback/      SQLite feedback store
 ├── memory/        mem0ai wrapper
 ├── api/           FastAPI routes, WebSocket handler, sessions
+├── skills/        AgentScope skill config + registration manager
 └── tests/         unit + integration tests
 
 scripts/
 ├── chat.py        CLI interface
 └── e2e_test.py    end-to-end test runner
 ```
+
+---
+
+## CLI commands
+
+During `scripts/chat.py` interactive mode:
+
+- `/help` — show command list
+- `/approve` — approve current topology plan
+- `/cheaper` — ask for a lower-cost topology
+- `/cancel` — clear pending topology
+- `/skills` — list currently loaded/configured skills
+- `/skill add <path> [master|subagent|all]` — validate + register a skill directory
+- `/skill remove <path>` — unregister a skill directory
+- `/skill create` — interactive wizard to create and register a new SKILL.md
+- `/raw` — toggle raw output on (shows JSON/code blocks)
+- `/clean` — toggle clean output on (hides raw structured payloads)
+- `/quit` or `/exit` — end session
 
 ---
 

@@ -61,6 +61,7 @@ async def execute_topology(
     on_node_start: object | None = None,     # callable(node_id, model_id, step_num, total_steps)
     on_node_complete: object | None = None,  # callable(NodeResult)
     daap_memory=None,                        # optional DaapMemory for node prompt enrichment
+    user_id: str | None = None,              # optional user_id for per-user memory
 ) -> ExecutionResult:
     """
     Execute a fully resolved topology end-to-end.
@@ -87,7 +88,7 @@ async def execute_topology(
         # 1. Build all nodes (optionally enriches system prompts via agent diary)
         built_nodes: dict[str, BuiltNode] = {}
         for rnode in resolved.nodes:
-            built = await build_node(rnode, tool_registry, daap_memory=daap_memory, tracker=exec_tracker)
+            built = await build_node(rnode, tool_registry, daap_memory=daap_memory, tracker=exec_tracker, user_id=user_id)
             built_nodes[rnode.node_id] = built
 
         # 2. Map node_id → output data_key (first declared output)
@@ -118,6 +119,9 @@ async def execute_topology(
                     on_node_start(nid, model_id, step_num, total_steps)
 
             step_start = time.time()
+            # Snapshot tokens BEFORE step runs so we can compute per-step delta
+            input_before_step = exec_tracker.total_input
+            output_before_step = exec_tracker.total_output
 
             # Retry wrapper per step
             last_exc: Exception | None = None
@@ -147,8 +151,12 @@ async def execute_topology(
 
             step_latency = time.time() - step_start
 
-            # Snapshot tracker totals before/after each node for per-node usage
-            tokens_before_step = exec_tracker.total_input + exec_tracker.total_output
+            # Distribute step token delta equally across nodes that ran.
+            # For single-node steps this is exact; for parallel steps it's an approximation.
+            nodes_ran = [nid for nid in step if nid in step_raw]
+            n_ran = max(len(nodes_ran), 1)
+            step_input_delta = (exec_tracker.total_input - input_before_step) // n_ran
+            step_output_delta = (exec_tracker.total_output - output_before_step) // n_ran
 
             # Remap node_id keys → data_key keys in data_store
             for nid in step:
@@ -164,8 +172,8 @@ async def execute_topology(
                         output_text=_truncate(step_raw[nid]),
                         latency_seconds=round(step_latency, 3),
                         model_id=model_id,
-                        input_tokens=exec_tracker.total_input,
-                        output_tokens=exec_tracker.total_output,
+                        input_tokens=step_input_delta,
+                        output_tokens=step_output_delta,
                     )
                     node_results.append(nr)
                     if on_node_complete:

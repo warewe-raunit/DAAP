@@ -109,7 +109,7 @@ async def test_build_node_anthropic_model_selection(mock_model_cls, mock_agent_c
     mock_model_cls.assert_called_once()
     call_kwargs = mock_model_cls.call_args.kwargs
     assert call_kwargs["model_name"] == "anthropic/claude-sonnet-4-6"
-    assert call_kwargs["client_args"]["base_url"] == "https://openrouter.ai/api/v1"
+    assert call_kwargs["client_kwargs"]["base_url"] == "https://openrouter.ai/api/v1"
 
 
 @pytest.mark.asyncio
@@ -130,7 +130,7 @@ async def test_build_node_openrouter_model_selection(mock_model_cls, mock_agent_
     mock_model_cls.assert_called_once()
     call_kwargs = mock_model_cls.call_args.kwargs
     assert call_kwargs["model_name"] == "anthropic/claude-3-5-sonnet"
-    assert call_kwargs["client_args"]["base_url"] == "https://openrouter.ai/api/v1"
+    assert call_kwargs["client_kwargs"]["base_url"] == "https://openrouter.ai/api/v1"
 
 
 @pytest.mark.asyncio
@@ -172,3 +172,24 @@ async def test_build_node_exposes_isolated_agent_factory(mock_model_cls, mock_ag
     a2 = built.agent_factory()
     assert a1 is not a2
     assert len(created_agents) >= 3  # initial agent + 2 factory spawns
+
+
+@pytest.mark.asyncio
+@patch("daap.executor.node_builder.ReActAgent")
+@patch("daap.executor.node_builder.TrackedOpenAIChatModel")
+async def test_build_node_applies_subagent_skills(mock_model_cls, mock_agent_cls):
+    mock_agent_cls.return_value = MagicMock()
+    mock_model_cls.return_value = MagicMock()
+
+    seen_targets: list[str] = []
+
+    def _fake_apply(toolkit, target):
+        seen_targets.append(target)
+        return []
+
+    node = make_resolved_node(agent_mode="react", tool_ids=["agentscope.tools.WebSearch"])
+    with patch("daap.executor.node_builder.apply_configured_skills", side_effect=_fake_apply):
+        await build_node(node, get_tool_registry())
+
+    assert seen_targets
+    assert set(seen_targets) == {"subagent"}

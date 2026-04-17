@@ -23,6 +23,11 @@ from daap.spec.estimator import estimate_topology
 from daap.spec.resolver import resolve_topology
 from daap.spec.schema import TopologySpec
 from daap.spec.validator import validate_topology
+from daap.skills.manager import (
+    SkillValidationError,
+    apply_configured_skills,
+    get_skill_manager,
+)
 from daap.tools.registry import get_available_tool_names
 
 
@@ -274,6 +279,27 @@ async def ask_user(questions_json: str) -> ToolResponse:
     )])
 
 
+def register_skill(directory: str, targets: str = "all") -> str:
+    """
+    Register a skill directory for this session and persist it for future runs.
+
+    Args:
+        directory: Absolute or relative path to the skill directory.
+        targets: "master", "subagent", or "all".
+    """
+    manager = get_skill_manager()
+    try:
+        name, was_new = manager.add_skill(directory, targets=targets, persist=True)
+        if not was_new:
+            return f"Skill '{name}' already registered."
+        target_display = targets if targets != "all" else "master, subagent"
+        return f"Skill '{name}' registered [{target_display}]."
+    except SkillValidationError as exc:
+        return f"Failed to register skill: {exc}"
+    except Exception as exc:
+        return f"Failed to register skill: {exc}"
+
+
 # ---------------------------------------------------------------------------
 # Toolkit factory
 # ---------------------------------------------------------------------------
@@ -281,8 +307,11 @@ async def ask_user(questions_json: str) -> ToolResponse:
 def create_master_toolkit() -> Toolkit:
     """Create the Toolkit for the master agent with all registered tools."""
     toolkit = Toolkit()
+    get_skill_manager().bind_toolkit(toolkit, target="master")
+    apply_configured_skills(toolkit, target="master")
     toolkit.register_tool_function(generate_topology)
     toolkit.register_tool_function(ask_user)
+    toolkit.register_tool_function(register_skill)
     # Future Phase 2 tools:
     # toolkit.register_tool_function(query_user_memory)
     # toolkit.register_tool_function(search_past_runs)

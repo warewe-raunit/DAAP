@@ -82,6 +82,7 @@ class ResolvedNode:
     outputs: list                    # IOSchema objects (unchanged)
     parallel_instances: int
     consolidation_func: str | None   # e.g. "daap.executor.consolidation.merge_outputs"
+    consolidation_strategy: str | None  # e.g. "merge", "deduplicate", "rank", "vote"
     handoff_mode: str                # enum value as string
     agent_mode: str                  # "react" or "single"
     max_react_iterations: int
@@ -221,7 +222,7 @@ def resolve_topology(
                     message=(
                         f"Node '{node.node_id}': tool '{binding.name}' not found in registry. "
                         f"Available tools: {list(TOOL_REGISTRY)}. "
-                        f"MCP tools must use format mcp://service_name."
+                        f"MCP tools must use format mcp://service_name or mcp://service_name/tool_name."
                     ),
                 ))
             else:
@@ -251,6 +252,12 @@ def resolve_topology(
         else:
             op = None
 
+        consolidation_strategy: str | None = (
+            node.instance_config.consolidation.value
+            if node.instance_config.consolidation is not None
+            else None
+        )
+
         resolved_nodes.append(ResolvedNode(
             node_id=node.node_id,
             role=node.role,
@@ -261,6 +268,7 @@ def resolve_topology(
             outputs=node.outputs,
             parallel_instances=node.instance_config.parallel_instances,
             consolidation_func=consolidation_func,
+            consolidation_strategy=consolidation_strategy,
             handoff_mode=node.handoff_mode.value,
             agent_mode=node.agent_mode.value,
             max_react_iterations=node.max_react_iterations,

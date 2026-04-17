@@ -170,11 +170,11 @@ async def _llm_consolidate(
         if "/" not in model_id:
             model_id = f"anthropic/{model_id}"
 
-        client_args = {"base_url": base_url} if base_url else None
+        client_kwargs = {"base_url": base_url} if base_url else None
         model = OpenAIChatModel(
             model_name=model_id,
             api_key=os.environ.get(api_key_env, ""),
-            client_args=client_args,
+            client_kwargs=client_kwargs,
             stream=False,
         )
         formatter = OpenAIChatFormatter()
@@ -239,11 +239,10 @@ async def run_execution_step(
 
         # Consolidate if needed
         if len(outputs) > 1 and built_node.consolidation_func:
-            # Derive consolidation model: use fast model for dedup, smart for rank
-            strategy = built_node.consolidation_func.rsplit(".", 1)[-1].replace("_outputs", "")
+            strategy = built_node.consolidation_strategy or "merge"
             # Phase 1: use a fixed model per strategy, same provider as node
             from daap.spec.resolver import MODEL_REGISTRY
-            if strategy in ("deduplicate",):
+            if strategy == "deduplicate":
                 cons_model = MODEL_REGISTRY.get("fast")
             else:
                 cons_model = MODEL_REGISTRY.get("smart")

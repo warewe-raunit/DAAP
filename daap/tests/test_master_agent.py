@@ -181,6 +181,24 @@ def test_both_tools_registered_in_toolkit():
     registered = set(toolkit.tools.keys())
     assert "generate_topology" in registered
     assert "ask_user" in registered
+    assert "register_skill" in registered
+
+
+def test_create_master_toolkit_applies_master_skills(monkeypatch):
+    """create_master_toolkit applies configured AgentScope skills for master target."""
+    import daap.master.tools as tools_module
+
+    seen: list[str] = []
+
+    def _fake_apply(toolkit, target):
+        seen.append(target)
+        return []
+
+    monkeypatch.setattr(tools_module, "apply_configured_skills", _fake_apply)
+
+    create_master_toolkit()
+
+    assert seen == ["master"]
 
 
 # ---------------------------------------------------------------------------
@@ -311,6 +329,13 @@ def test_prompt_instructs_to_ask_questions_via_tool():
     assert "ask_user" in prompt.lower()
 
 
+def test_prompt_includes_skill_registration_hint():
+    """System prompt instructs the agent to call register_skill for skill paths."""
+    prompt = get_master_system_prompt()
+    assert "register_skill" in prompt
+    assert "skill directory" in prompt.lower()
+
+
 def test_prompt_enforces_action_or_final_output():
     """System prompt enforces tool action or final output, not intent-only text."""
     prompt = get_master_system_prompt()
@@ -436,4 +461,4 @@ def test_create_master_agent_openrouter(mock_react_cls, mock_tracked_cls):
     assert mock_tracked_cls.called
     call_kwargs = mock_tracked_cls.call_args.kwargs
     assert call_kwargs["model_name"] == "anthropic/claude-sonnet-4-5"
-    assert call_kwargs["client_args"]["base_url"] == "https://openrouter.ai/api/v1"
+    assert call_kwargs["client_kwargs"]["base_url"] == "https://openrouter.ai/api/v1"

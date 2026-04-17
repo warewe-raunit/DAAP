@@ -1,86 +1,230 @@
 """
-DAAP Memory Reader — pre-run reads from Mem0.
+Memory reader — blocking, but fast.
 
-Called before the master agent runs (to inject user context into the
-system prompt) and before each node executes (to enrich system prompts
-with agent diary learnings).
+Reads are synchronous because the caller needs results before continuing.
+Mem0's selective pipeline has ~1.5s p95 latency — acceptable for blocking reads.
+
+All reads are defensive: return empty on failure, never crash.
 """
 
-from daap.memory.client import DaapMemory
+import logging
+
+from daap.memory.config import get_memory_client, check_memory_available
+from daap.memory.scopes import profile_scope, master_scope, agent_diary_scope
+
+logger = logging.getLogger(__name__)
 
 
-def load_user_context_for_master(
-    memory: DaapMemory,
+def load_user_profile(user_id: str, limit: int = 10) -> list[str]:
+    """
+    Load user profile facts (ICP, product, preferences).
+
+    Called: at master agent start, to inform topology generation.
+    Returns list of memory strings. Empty list on failure or no data.
+    """
+    try:
+        client = get_memory_client()
+        result = client.get_all(
+            **profile_scope(user_id),
+            limit=limit,
+        )
+        return [m["memory"] for m in result.get("results", [])]
+    except Exception as e:
+        logger.warning(f"load_user_profile failed for user {user_id}: {e}")
+        return []
+
+
+def search_user_profile(user_id: str, query: str, limit: int = 5) -> list[str]:
+    """
+    Semantic search in user profile.
+
+    Use when you want specific info rather than all.
+    """
+    try:
+        client = get_memory_client()
+        result = client.search(
+            query=query,
+            **profile_scope(user_id),
+            limit=limit,
+        )
+        return [m["memory"] for m in result.get("results", [])]
+    except Exception as e:
+        logger.warning(f"search_user_profile failed: {e}")
+        return []
+
+
+def load_master_history(user_id: str, query: str, limit: int = 5) -> list[str]:
+    """
+    Search master agent memory for similar past runs.
+
+    Called: at master agent start with user's new prompt as query.
+    Returns semantically similar past run summaries.
+    """
+    if not query or not query.strip():
+        query = "past run topology result"
+
+    try:
+        client = get_memory_client()
+        result = client.search(
+            query=query,
+            **master_scope(user_id),
+            limit=limit,
+        )
+        return [m["memory"] for m in result.get("results", [])]
+    except Exception as e:
+        logger.warning(f"load_master_history failed: {e}")
+        return []
+
+
+def load_agent_diary(
     user_id: str,
-    user_prompt: str = "",
-) -> dict | None:
+    role: str,
+    query: str | None = None,
+    limit: int = 5,
+) -> list[str]:
     """
-    Load user context from memory for the master agent system prompt.
+    Load relevant diary entries for a specific node role.
 
-    Returns a dict with keys: profile, preferences, recent_runs.
-    Returns None if the user has no memories (first-time user).
+    Called: per-node, before execution, to enrich system prompt.
+
+    Args:
+        user_id: whose diary
+        role: node role (e.g., "researcher")
+        query: optional semantic search query (uses node task as query)
+        limit: max entries to return
     """
-    context = memory.get_user_context(user_id, query=user_prompt or None)
+    try:
+        client = get_memory_client()
+        scope = agent_diary_scope(user_id, role)
 
-    has_content = any([
-        context.get("profile"),
-        context.get("preferences"),
-        context.get("recent_runs"),
-    ])
+        if query:
+            result = client.search(query=query, limit=limit, **scope)
+        else:
+            result = client.get_all(limit=limit, **scope)
 
-    return context if has_content else None
+        return [m["memory"] for m in result.get("results", [])]
+    except Exception as e:
+        logger.warning(f"load_agent_diary failed: {e}")
+        return []
 
 
-def load_agent_context_for_node(
-    memory: DaapMemory,
-    agent_role: str,
-    task_description: str,
-) -> str:
+def memory_is_available() -> bool:
+    """Quick check: can we use memory right now?"""
+    ok, _ = check_memory_available()
+    return ok
+
+
+# ============================================================================
+# Client-DaapMemory-based helpers (used by node_builder and sessions)
+# ============================================================================
+
+def load_agent_context_for_node(memory, role: str, task: str) -> str:
     """
-    Load agent diary learnings for a specific node role.
+    Load and format agent learnings for a node's system prompt.
 
-    Returns a markdown string to prepend to the node's system prompt.
-    Returns empty string if no learnings exist — caller uses as-is.
+    Args:
+        memory: DaapMemory instance (daap.memory.client.DaapMemory)
+        role:   node role (e.g., "researcher", "writer")
+        task:   short task description for semantic search
+
+    Returns:
+        Formatted string with learnings, or "" if none found.
     """
-    learnings = memory.get_agent_learnings(agent_role, task_description)
+    try:
+        learnings = memory.get_agent_learnings(role, task)
+    except Exception:
+        return ""
 
+    learnings = [l for l in learnings if l]
     if not learnings:
         return ""
 
-    lines = ["## Learnings from past runs (use these to improve your work):"]
-    for learning in learnings:
-        lines.append(f"- {learning}")
-
+    lines = ["Learnings from past runs:"]
+    for l in learnings:
+        lines.append(f"- {l}")
     return "\n".join(lines)
 
 
-def format_user_context_for_prompt(context: dict) -> str:
+def load_user_context_for_master(memory, user_id: str, query: str) -> dict | None:
     """
-    Format a user context dict into a readable string for system prompts.
+    Load user context for the master agent system prompt.
 
-    Returns empty string if context is None or empty.
+    Args:
+        memory:  DaapMemory instance (daap.memory.client.DaapMemory)
+        user_id: user identifier
+        query:   current user prompt (for semantic search)
+
+    Returns:
+        Dict with keys profile/preferences/recent_runs, or None if no memories.
     """
-    if not context:
+    try:
+        ctx = memory.get_user_context(user_id, query)
+    except Exception:
+        return None
+
+    if not any(ctx.values()):
+        return None
+    return ctx
+
+
+def format_user_context_for_prompt(ctx: dict | None) -> str:
+    """
+    Format user context dict into prompt-ready text.
+
+    Returns "" for None or empty dict.
+    """
+    if not ctx:
         return ""
 
     sections = []
+    if ctx.get("profile"):
+        lines = ["## User Profile"]
+        lines.extend(f"- {m}" for m in ctx["profile"] if m)
+        sections.append("\n".join(lines))
+    if ctx.get("preferences"):
+        lines = ["## User Preferences"]
+        lines.extend(f"- {m}" for m in ctx["preferences"] if m)
+        sections.append("\n".join(lines))
+    if ctx.get("recent_runs"):
+        lines = ["## Recent Run History"]
+        lines.extend(f"- {m}" for m in ctx["recent_runs"] if m)
+        sections.append("\n".join(lines))
 
-    if context.get("profile"):
-        sections.append("**User Profile:**")
-        for fact in context["profile"]:
-            if fact:
-                sections.append(f"  - {fact}")
+    return "\n\n".join(sections) if sections else ""
 
-    if context.get("preferences"):
-        sections.append("**User Preferences:**")
-        for pref in context["preferences"]:
-            if pref:
-                sections.append(f"  - {pref}")
 
-    if context.get("recent_runs"):
-        sections.append("**Recent Run History:**")
-        for run in context["recent_runs"]:
-            if run:
-                sections.append(f"  - {run}")
+# ============================================================================
+# Formatting helpers — convert memory lists to prompt-ready text
+# ============================================================================
 
-    return "\n".join(sections)
+def format_profile_for_prompt(profile_memories: list[str]) -> str:
+    """Format profile memories for injection into master agent system prompt."""
+    if not profile_memories:
+        return ""
+
+    lines = ["\n## What I Know About This User"]
+    for m in profile_memories:
+        lines.append(f"- {m}")
+    return "\n".join(lines) + "\n"
+
+
+def format_history_for_prompt(history_memories: list[str]) -> str:
+    """Format past run history for master agent prompt."""
+    if not history_memories:
+        return ""
+
+    lines = ["\n## Relevant Past Runs"]
+    for m in history_memories:
+        lines.append(f"- {m}")
+    return "\n".join(lines) + "\n"
+
+
+def format_diary_for_prompt(diary_memories: list[str], role: str) -> str:
+    """Format agent diary for injection into node system prompt."""
+    if not diary_memories:
+        return ""
+
+    lines = [f"\n## Lessons From Past {role.title()} Runs"]
+    for m in diary_memories:
+        lines.append(f"- {m}")
+    return "\n".join(lines) + "\n"

@@ -1,297 +1,368 @@
 """
-DAAP Memory Tests — pytest suite for memory/client.py, reader.py, writer.py
+DAAP Memory Tests — config, scopes, extractors, reader, writer, palace.
 
 All tests mock mem0.Memory — no real API calls, no Qdrant, no OpenAI key needed.
 """
 
-from unittest.mock import MagicMock, patch
+import asyncio
+from unittest.mock import MagicMock
 
 import pytest
 
-from daap.executor.engine import ExecutionResult, NodeResult
-
 
 # ---------------------------------------------------------------------------
-# Mock factory
+# Helpers
 # ---------------------------------------------------------------------------
 
-def make_mock_mem0(search_results: list[dict] | None = None):
-    """Return a MagicMock that mimics the mem0.Memory interface."""
-    mock = MagicMock()
-    mock.add.return_value = {"results": [{"id": "test-mem-1", "memory": "stored"}]}
-
-    results = search_results if search_results is not None else [
-        {"memory": "User sells project management SaaS", "id": "m1"},
-        {"memory": "Target: mid-size construction companies", "id": "m2"},
-    ]
-    mock.search.return_value = {"results": results}
-    mock.get_all.return_value = [{"memory": "User sells SaaS", "id": "m1"}]
-    return mock
-
-
-def make_daap_memory(mock_mem0=None):
-    """Create a DaapMemory with injected mock mem0 instance."""
-    from daap.memory.client import DaapMemory
-    mem = DaapMemory.__new__(DaapMemory)
-    mem.mem = mock_mem0 or make_mock_mem0()
-    return mem
-
-
-def make_execution_result(success: bool = True) -> ExecutionResult:
-    return ExecutionResult(
-        topology_id="topo-test0001",
-        final_output="10 leads found and emails drafted.",
-        node_results=[
-            NodeResult(node_id="researcher", output_text="Company A, Company B...", latency_seconds=1.5),
-            NodeResult(node_id="email_drafter", output_text="Dear John...", latency_seconds=0.8),
-        ],
-        total_latency_seconds=2.3,
-        success=success,
-        error=None if success else "Timeout on researcher node",
-    )
-
-
-# ---------------------------------------------------------------------------
-# DaapMemory — user profile
-# ---------------------------------------------------------------------------
-
-def test_store_and_retrieve_user_profile():
-    """store_user_profile calls mem.add with correct user_id and category."""
-    mock_mem = make_mock_mem0()
-    mem = make_daap_memory(mock_mem)
-
-    mem.store_user_profile("user-001", "User sells SaaS to construction companies.")
-
-    mock_mem.add.assert_called_once()
-    call_kwargs = mock_mem.add.call_args[1]
-    assert call_kwargs["user_id"] == "user-001"
-    assert call_kwargs["metadata"]["category"] == "profile"
-
-
-def test_store_and_retrieve_preferences():
-    """store_user_preference calls mem.add with preferences category."""
-    mock_mem = make_mock_mem0()
-    mem = make_daap_memory(mock_mem)
-
-    mem.store_user_preference("user-002", "User prefers short emails under 100 words.")
-
-    mock_mem.add.assert_called_once()
-    call_kwargs = mock_mem.add.call_args[1]
-    assert call_kwargs["user_id"] == "user-002"
-    assert call_kwargs["metadata"]["category"] == "preferences"
-
-
-def test_get_user_context_returns_structured():
-    """get_user_context returns dict with profile, preferences, recent_runs keys."""
-    mock_mem = make_mock_mem0(search_results=[
-        {"memory": "User sells project management SaaS", "id": "m1"},
-    ])
-    mem = make_daap_memory(mock_mem)
-
-    ctx = mem.get_user_context("user-003", query="SaaS construction")
-
-    assert "profile" in ctx
-    assert "preferences" in ctx
-    assert "recent_runs" in ctx
-    assert isinstance(ctx["profile"], list)
-    assert isinstance(ctx["preferences"], list)
-    assert isinstance(ctx["recent_runs"], list)
-
-
-def test_get_user_context_empty_for_new_user():
-    """get_user_context with no search results → all lists empty."""
-    mock_mem = make_mock_mem0(search_results=[])
-    mem = make_daap_memory(mock_mem)
-
-    ctx = mem.get_user_context("brand-new-user")
-
-    assert ctx["profile"] == []
-    assert ctx["preferences"] == []
-    assert ctx["recent_runs"] == []
-
-
-# ---------------------------------------------------------------------------
-# DaapMemory — run history
-# ---------------------------------------------------------------------------
-
-def test_store_run_result():
-    """store_run_result calls mem.add with runs category and run_id."""
-    mock_mem = make_mock_mem0()
-    mem = make_daap_memory(mock_mem)
-
-    mem.store_run_result(
-        user_id="user-004",
-        run_summary="Completed pipeline. Found 10 leads. Cost: $0.11.",
-        run_id="topo-abc12345",
-    )
-
-    mock_mem.add.assert_called_once()
-    call_kwargs = mock_mem.add.call_args[1]
-    assert call_kwargs["user_id"] == "user-004"
-    assert call_kwargs["run_id"] == "topo-abc12345"
-    assert call_kwargs["metadata"]["category"] == "runs"
-
-
-# ---------------------------------------------------------------------------
-# DaapMemory — agent diary
-# ---------------------------------------------------------------------------
-
-def test_store_agent_learning():
-    """store_agent_learning scopes to agent_id daap_{role}."""
-    mock_mem = make_mock_mem0()
-    mem = make_daap_memory(mock_mem)
-
-    mem.store_agent_learning(
-        "researcher",
-        "Keyword 'field operations management' works better than 'construction PM'.",
-    )
-
-    mock_mem.add.assert_called_once()
-    call_kwargs = mock_mem.add.call_args[1]
-    assert call_kwargs["agent_id"] == "daap_researcher"
-    assert call_kwargs["metadata"]["category"] == "agent_diary"
-
-
-def test_agent_learnings_scoped_by_role():
-    """get_agent_learnings searches by agent_id — different roles don't mix."""
-    mock_mem = make_mock_mem0(search_results=[
-        {"memory": "Use 'field operations' as search keyword", "id": "r1"},
-    ])
-    mem = make_daap_memory(mock_mem)
-
-    learnings = mem.get_agent_learnings("researcher", "construction lead search")
-
-    mock_mem.search.assert_called_once()
-    call_kwargs = mock_mem.search.call_args[1]
-    assert call_kwargs["agent_id"] == "daap_researcher"
-    assert len(learnings) == 1
-    assert "field operations" in learnings[0]
-
-
-def test_user_memories_scoped_by_user():
-    """Separate user_id values produce separate search calls with correct user_id."""
-    mock_mem = make_mock_mem0()
-    mem = make_daap_memory(mock_mem)
-
-    mem.get_user_context("user-A", query="test")
-    mem.get_user_context("user-B", query="test")
-
-    # Each context call makes 3 searches — verify user_id isolation
-    all_calls = mock_mem.search.call_args_list
-    user_ids_used = {call[1]["user_id"] for call in all_calls}
-    assert "user-A" in user_ids_used
-    assert "user-B" in user_ids_used
-
-
-# ---------------------------------------------------------------------------
-# reader.py
-# ---------------------------------------------------------------------------
-
-def test_format_user_context_for_prompt():
-    """format_user_context_for_prompt produces a readable string with sections."""
-    from daap.memory.reader import format_user_context_for_prompt
-
-    context = {
-        "profile": ["User sells SaaS", "Target: construction companies"],
-        "preferences": ["Prefer short emails"],
-        "recent_runs": ["Last run found 10 leads"],
-    }
-
-    result = format_user_context_for_prompt(context)
-
-    assert "User Profile" in result
-    assert "User Preferences" in result
-    assert "Recent Run History" in result
-    assert "construction companies" in result
-    assert "short emails" in result
-
-
-def test_load_agent_context_for_node_empty():
-    """load_agent_context_for_node returns empty string when no learnings."""
-    from daap.memory.reader import load_agent_context_for_node
-
-    mock_mem = make_mock_mem0(search_results=[])
-    mem = make_daap_memory(mock_mem)
-
-    result = load_agent_context_for_node(mem, "researcher", "find leads")
-
-    assert result == ""
-
-
-def test_load_user_context_returns_none_for_new_user():
-    """load_user_context_for_master returns None when user has no memories."""
-    from daap.memory.reader import load_user_context_for_master
-
-    mock_mem = make_mock_mem0(search_results=[])
-    mem = make_daap_memory(mock_mem)
-
-    result = load_user_context_for_master(mem, "brand-new-user", "I need leads")
-
-    assert result is None
-
-
-# ---------------------------------------------------------------------------
-# writer.py
-# ---------------------------------------------------------------------------
-
-def test_write_run_to_memory_formats_correctly():
-    """write_run_to_memory stores a summary containing key metrics."""
-    from daap.memory.writer import write_run_to_memory
-
-    mock_mem = make_mock_mem0()
-    mem = make_daap_memory(mock_mem)
-    result = make_execution_result(success=True)
-
-    write_run_to_memory(
-        memory=mem,
-        user_id="user-005",
-        topology_summary="4-agent sales pipeline for construction SaaS",
-        execution_result=result,
-        user_rating=4,
-        user_comment="Emails were slightly too long.",
-    )
-
-    mock_mem.add.assert_called_once()
-    stored_text = mock_mem.add.call_args[0][0]
-    assert "successful" in stored_text
-    assert "4/5" in stored_text
-    assert "Emails were slightly too long" in stored_text
-    assert "2" in stored_text  # latency seconds
-
-
-def test_write_user_feedback():
-    """write_user_feedback calls store_user_rating with correct user_id."""
-    from daap.memory.writer import write_user_feedback
-
-    mock_mem = make_mock_mem0()
-    mem = make_daap_memory(mock_mem)
-
-    write_user_feedback(mem, "user-006", "User rated run 5/5. Great results.")
-
-    mock_mem.add.assert_called_once()
-    call_kwargs = mock_mem.add.call_args[1]
-    assert call_kwargs["user_id"] == "user-006"
-    assert call_kwargs["metadata"]["category"] == "feedback"
-
-
-def test_write_agent_learnings_from_run():
-    """write_agent_learnings_from_run stores a learning per node result."""
-    from daap.memory.writer import write_agent_learnings_from_run
-
-    mock_mem = make_mock_mem0()
-    mem = make_daap_memory(mock_mem)
-    result = make_execution_result()
-
-    topology_nodes = [
-        {"node_id": "researcher", "role": "Lead Researcher"},
-        {"node_id": "email_drafter", "role": "Email Writer"},
-    ]
-
-    write_agent_learnings_from_run(mem, result, topology_nodes)
-
-    # One add() call per node result
-    assert mock_mem.add.call_count == 2
-
-    all_agent_ids = {call[1]["agent_id"] for call in mock_mem.add.call_args_list}
-    assert "daap_researcher" in all_agent_ids
-    assert "daap_writer" in all_agent_ids
+def _mock_mem0_client(results=None):
+    """Build a mock Mem0 Memory client."""
+    client = MagicMock()
+    results = results or []
+    client.get_all.return_value = {"results": results}
+    client.search.return_value = {"results": results}
+    client.add.return_value = {"results": []}
+    client.delete_all.return_value = None
+    return client
+
+
+# ===========================================================================
+# Config tests
+# ===========================================================================
+
+class TestConfig:
+    def test_build_config_production_has_qdrant(self):
+        from daap.memory.config import build_config
+        cfg = build_config("production")
+        assert cfg["vector_store"]["provider"] == "qdrant"
+        assert cfg["vector_store"]["config"]["collection_name"] == "daap_memories"
+
+    def test_build_config_testing_no_vector_store(self):
+        from daap.memory.config import build_config
+        cfg = build_config("testing")
+        assert "vector_store" not in cfg
+
+    def test_build_config_llm_uses_openrouter(self):
+        from daap.memory.config import build_config
+        cfg = build_config("production")
+        assert cfg["llm"]["provider"] == "openai"
+        assert "openrouter.ai" in cfg["llm"]["config"]["openai_base_url"]
+        assert "gemini" in cfg["llm"]["config"]["model"]
+
+    def test_build_config_embedder_is_text_embedding(self):
+        from daap.memory.config import build_config
+        cfg = build_config()
+        assert cfg["embedder"]["config"]["model"] == "text-embedding-3-small"
+
+    def test_check_memory_available_missing_openai_key(self, monkeypatch):
+        import daap.memory.config as cfg_mod
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+        cfg_mod.reset_memory_client()
+        from daap.memory.config import check_memory_available
+        ok, reason = check_memory_available()
+        assert not ok
+        assert "OPENAI_API_KEY" in reason
+
+    def test_check_memory_available_missing_openrouter_key(self, monkeypatch):
+        import daap.memory.config as cfg_mod
+        monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+        monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+        cfg_mod.reset_memory_client()
+        from daap.memory.config import check_memory_available
+        ok, reason = check_memory_available()
+        assert not ok
+        assert "OPENROUTER_API_KEY" in reason
+
+    def test_reset_memory_client_clears_singleton(self):
+        import daap.memory.config as cfg_mod
+        cfg_mod._memory_client = MagicMock()
+        cfg_mod.reset_memory_client()
+        assert cfg_mod._memory_client is None
+
+
+# ===========================================================================
+# Scopes tests
+# ===========================================================================
+
+class TestScopes:
+    def test_profile_scope(self):
+        from daap.memory.scopes import profile_scope
+        s = profile_scope("alice")
+        assert s == {"user_id": "alice", "agent_id": "profile"}
+
+    def test_master_scope(self):
+        from daap.memory.scopes import master_scope
+        s = master_scope("alice")
+        assert s == {"user_id": "alice", "agent_id": "master"}
+
+    def test_agent_diary_scope_normalizes_role(self):
+        from daap.memory.scopes import agent_diary_scope
+        s = agent_diary_scope("alice", "Lead Researcher")
+        assert s == {"user_id": "alice", "agent_id": "researcher_diary"}
+
+    def test_agent_diary_scope_writer(self):
+        from daap.memory.scopes import agent_diary_scope
+        s = agent_diary_scope("alice", "Email Drafter")
+        assert s["agent_id"] == "writer_diary"
+
+    def test_all_user_scope(self):
+        from daap.memory.scopes import all_user_scope
+        s = all_user_scope("bob")
+        assert s == {"user_id": "bob"}
+
+    def test_normalize_role_evaluator(self):
+        from daap.memory.scopes import _normalize_role
+        assert _normalize_role("Lead Scorer") == "evaluator"
+
+    def test_normalize_role_formatter(self):
+        from daap.memory.scopes import _normalize_role
+        assert _normalize_role("Output Formatter") == "formatter"
+
+    def test_normalize_role_unknown_falls_back(self):
+        from daap.memory.scopes import _normalize_role
+        assert _normalize_role("Outbound Specialist") == "outbound_specialist"
+
+
+# ===========================================================================
+# Extractor tests
+# ===========================================================================
+
+class TestExtractors:
+    def test_extract_profile_from_conversation_no_clarifications(self):
+        from daap.memory.extractors import extract_profile_from_conversation
+        msgs = extract_profile_from_conversation("I sell SaaS to construction firms")
+        assert len(msgs) == 1
+        assert msgs[0]["role"] == "user"
+        assert "SaaS" in msgs[0]["content"]
+
+    def test_extract_profile_from_conversation_with_clarifications(self):
+        from daap.memory.extractors import extract_profile_from_conversation
+        clars = [("What is your ICP?", "SMB construction"), ("What's your ACV?", "$12k")]
+        msgs = extract_profile_from_conversation("help me", clars)
+        assert len(msgs) == 5  # user + 2x(assistant+user)
+        assert msgs[1]["role"] == "assistant"
+        assert msgs[2]["content"] == "SMB construction"
+
+    def test_extract_run_summary_success(self):
+        from daap.memory.extractors import extract_run_summary
+        topo = {"nodes": [{"role": "researcher"}, {"role": "writer"}]}
+        result = {"success": True, "total_cost_usd": 0.0023, "total_latency_seconds": 5.1}
+        summary = extract_run_summary(topo, result, user_rating=4)
+        assert "2-node" in summary
+        assert "succeeded" in summary
+        assert "4/5" in summary
+
+    def test_extract_run_summary_failure(self):
+        from daap.memory.extractors import extract_run_summary
+        topo = {"nodes": [{"role": "researcher"}]}
+        result = {"success": False, "error": "timeout", "cost_usd": 0, "latency_seconds": 0}
+        summary = extract_run_summary(topo, result)
+        assert "failed" in summary
+        assert "timeout" in summary
+
+    def test_extract_agent_observation_success(self):
+        from daap.memory.extractors import extract_agent_observation
+        obs = extract_agent_observation("researcher", "Found 10 leads", 3.2, "gemini-flash", True)
+        assert "researcher" in obs
+        assert "completed" in obs
+        assert "Found 10 leads" in obs
+
+    def test_extract_correction_low_rating(self):
+        from daap.memory.extractors import extract_correction_from_rating
+        correction = extract_correction_from_rating(1, comment="too vague", topology_summary="3 nodes")
+        assert correction is not None
+        assert "1/5" in correction
+        assert "too vague" in correction
+        assert "Avoid" in correction
+
+    def test_extract_correction_high_rating_returns_none(self):
+        from daap.memory.extractors import extract_correction_from_rating
+        correction = extract_correction_from_rating(4)
+        assert correction is None
+
+    def test_extract_correction_rating_2_triggers(self):
+        from daap.memory.extractors import extract_correction_from_rating
+        correction = extract_correction_from_rating(2)
+        assert correction is not None
+
+
+# ===========================================================================
+# Reader tests (with mocked client)
+# ===========================================================================
+
+class TestReader:
+    @pytest.fixture(autouse=True)
+    def mock_client(self, monkeypatch):
+        self.client = _mock_mem0_client(
+            results=[{"memory": "User sells SaaS"}, {"memory": "ICP: construction firms"}]
+        )
+        monkeypatch.setattr("daap.memory.reader.get_memory_client", lambda: self.client)
+
+    def test_load_user_profile_returns_memory_strings(self):
+        from daap.memory.reader import load_user_profile
+        result = load_user_profile("alice")
+        assert result == ["User sells SaaS", "ICP: construction firms"]
+        self.client.get_all.assert_called_once()
+
+    def test_load_user_profile_returns_empty_on_exception(self):
+        from daap.memory.reader import load_user_profile
+        self.client.get_all.side_effect = RuntimeError("boom")
+        result = load_user_profile("alice")
+        assert result == []
+
+    def test_load_master_history_uses_search(self):
+        from daap.memory.reader import load_master_history
+        load_master_history("alice", "lead gen emails")
+        self.client.search.assert_called_once()
+        call_kwargs = self.client.search.call_args[1]
+        assert call_kwargs["query"] == "lead gen emails"
+
+    def test_load_master_history_empty_query_uses_fallback(self):
+        from daap.memory.reader import load_master_history
+        load_master_history("alice", "")
+        call_kwargs = self.client.search.call_args[1]
+        assert call_kwargs["query"] == "past run topology result"
+
+    def test_load_agent_diary_with_query_uses_search(self):
+        from daap.memory.reader import load_agent_diary
+        load_agent_diary("alice", "researcher", query="find leads")
+        self.client.search.assert_called_once()
+
+    def test_load_agent_diary_no_query_uses_get_all(self):
+        from daap.memory.reader import load_agent_diary
+        load_agent_diary("alice", "researcher")
+        self.client.get_all.assert_called_once()
+
+    def test_format_profile_for_prompt_empty(self):
+        from daap.memory.reader import format_profile_for_prompt
+        result = format_profile_for_prompt([])
+        assert result == ""
+
+    def test_format_profile_for_prompt_includes_header(self):
+        from daap.memory.reader import format_profile_for_prompt
+        result = format_profile_for_prompt(["fact one", "fact two"])
+        assert "## What I Know About This User" in result
+        assert "- fact one" in result
+
+    def test_format_diary_for_prompt_includes_role(self):
+        from daap.memory.reader import format_diary_for_prompt
+        result = format_diary_for_prompt(["lesson1"], "researcher")
+        assert "Researcher" in result
+        assert "lesson1" in result
+
+
+# ===========================================================================
+# Writer tests (async)
+# ===========================================================================
+
+class TestWriter:
+    @pytest.fixture(autouse=True)
+    def mock_client(self, monkeypatch):
+        self.client = _mock_mem0_client()
+        monkeypatch.setattr("daap.memory.writer.get_memory_client", lambda: self.client)
+
+    def test_write_profile_async_calls_client_add(self):
+        from daap.memory.writer import write_profile_async
+        asyncio.run(
+            write_profile_async("alice", "I sell SaaS to construction")
+        )
+        self.client.add.assert_called_once()
+
+    def test_write_run_summary_async_calls_client_add(self):
+        from daap.memory.writer import write_run_summary_async
+        topo = {"nodes": [{"role": "researcher"}]}
+        result = {"success": True, "total_cost_usd": 0.001, "total_latency_seconds": 2.0}
+        asyncio.run(
+            write_run_summary_async("alice", topo, result)
+        )
+        self.client.add.assert_called_once()
+
+    def test_write_correction_skips_high_rating(self):
+        from daap.memory.writer import write_correction_async
+        asyncio.run(
+            write_correction_async("alice", 5)
+        )
+        self.client.add.assert_not_called()
+
+    def test_write_correction_fires_for_low_rating(self):
+        from daap.memory.writer import write_correction_async
+        asyncio.run(
+            write_correction_async("alice", 1, comment="bad output")
+        )
+        self.client.add.assert_called_once()
+
+
+# ===========================================================================
+# Palace (DaapMemory facade) tests
+# ===========================================================================
+
+class TestPalace:
+    def test_daap_memory_unavailable_when_no_keys(self, monkeypatch):
+        monkeypatch.setattr("daap.memory.reader.memory_is_available", lambda: False)
+        from daap.memory.palace import DaapMemory
+        mem = DaapMemory()
+        assert not mem.available
+
+    def test_get_user_profile_returns_empty_when_unavailable(self, monkeypatch):
+        monkeypatch.setattr("daap.memory.reader.memory_is_available", lambda: False)
+        from daap.memory.palace import DaapMemory
+        mem = DaapMemory()
+        assert mem.get_user_profile("alice") == []
+
+    def test_get_past_runs_returns_empty_when_unavailable(self, monkeypatch):
+        monkeypatch.setattr("daap.memory.reader.memory_is_available", lambda: False)
+        from daap.memory.palace import DaapMemory
+        mem = DaapMemory()
+        assert mem.get_past_runs("alice", "leads") == []
+
+    def test_format_for_master_prompt_returns_empty_when_unavailable(self, monkeypatch):
+        monkeypatch.setattr("daap.memory.reader.memory_is_available", lambda: False)
+        from daap.memory.palace import DaapMemory
+        mem = DaapMemory()
+        result = mem.format_for_master_prompt("alice", "some prompt")
+        assert result == ""
+
+    def test_format_for_node_prompt_returns_empty_when_unavailable(self, monkeypatch):
+        monkeypatch.setattr("daap.memory.reader.memory_is_available", lambda: False)
+        from daap.memory.palace import DaapMemory
+        mem = DaapMemory()
+        result = mem.format_for_node_prompt("alice", "researcher", "find leads")
+        assert result == ""
+
+    def test_remember_run_fires_when_available(self, monkeypatch):
+        fired = []
+        monkeypatch.setattr("daap.memory.reader.memory_is_available", lambda: True)
+        monkeypatch.setattr("daap.memory.writer.fire_and_forget", lambda coro: fired.append(coro))
+        from daap.memory.palace import DaapMemory
+        mem = DaapMemory()
+        mem.remember_run("alice", {"nodes": []}, {"success": True})
+        assert len(fired) == 1
+
+    def test_remember_run_skips_when_unavailable(self, monkeypatch):
+        fired = []
+        monkeypatch.setattr("daap.memory.reader.memory_is_available", lambda: False)
+        monkeypatch.setattr("daap.memory.writer.fire_and_forget", lambda coro: fired.append(coro))
+        from daap.memory.palace import DaapMemory
+        mem = DaapMemory()
+        mem.remember_run("alice", {"nodes": []}, {"success": True})
+        assert len(fired) == 0
+
+    def test_remember_correction_fires_regardless_of_rating(self, monkeypatch):
+        fired = []
+        monkeypatch.setattr("daap.memory.reader.memory_is_available", lambda: True)
+        monkeypatch.setattr("daap.memory.writer.fire_and_forget", lambda coro: fired.append(coro))
+        from daap.memory.palace import DaapMemory
+        mem = DaapMemory()
+        mem.remember_correction("alice", 5)
+        # fire_and_forget is called; write_correction_async skips internally for high rating
+        assert len(fired) == 1
+
+    def test_get_memory_singleton(self, monkeypatch):
+        monkeypatch.setattr("daap.memory.reader.memory_is_available", lambda: False)
+        import daap.memory.palace as palace_mod
+        palace_mod._default_memory = None
+        from daap.memory.palace import get_memory
+        m1 = get_memory()
+        m2 = get_memory()
+        assert m1 is m2
+        palace_mod._default_memory = None  # cleanup
