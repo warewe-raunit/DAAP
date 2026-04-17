@@ -9,9 +9,10 @@ Commands during chat:
     clean        — hide raw JSON/code blocks (default)
     help         — show command help
     approve      — approve latest topology plan
-  cheaper       — ask agent to make topology cheaper
-  cancel        — cancel pending topology
-  quit / exit   — end session
+    cheaper      — ask agent to make topology cheaper
+    cancel       — cancel pending topology
+    skill        — manage skills (/skill add|remove|create)
+    quit / exit  — end session
 
 Requires: OPENROUTER_API_KEY in .env or environment.
 """
@@ -20,6 +21,7 @@ import argparse
 import asyncio
 import json
 import re
+import shlex
 import shutil
 import sys
 import os
@@ -33,11 +35,9 @@ if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
-try:
-    from dotenv import load_dotenv
-    load_dotenv(os.path.join(os.path.dirname(os.path.dirname(__file__)), ".env"))
-except ImportError:
-    pass
+from daap.env import load_project_env
+
+load_project_env()
 
 from agentscope.message import Msg
 from daap.api.sessions import Session, SessionManager, create_session_scoped_toolkit
@@ -85,7 +85,7 @@ def _print_header(raw_output: bool):
     mode = "RAW" if raw_output else "CLEAN"
     print(f"\n{BOLD}DAAP CLI{RESET} {DIM}[{mode} mode]{RESET}")
     print(f"{DIM}{'-' * min(_terminal_width(), 100)}{RESET}")
-    print(f"{DIM}Commands: /help /approve /cheaper /cancel /mcp /skills /profile /raw /clean /quit{RESET}\n")
+    print(f"{DIM}Commands: /help /approve /cheaper /cancel /mcp /skills /skill /profile /raw /clean /quit{RESET}\n")
 
 
 def _print_wrapped(text: str, indent: int = 2):
@@ -311,8 +311,41 @@ def _extract_text(content) -> str:
 
     _walk(content)
     if parts:
-        return "\n".join(parts)
+        deduped: list[str] = []
+        for part in parts:
+            text = str(part or "").strip()
+            if not text:
+                continue
+            normalized = re.sub(r"\s+", " ", text)
+            prev_normalized = (
+                re.sub(r"\s+", " ", deduped[-1].strip())
+                if deduped
+                else None
+            )
+            if normalized == prev_normalized:
+                continue
+            deduped.append(text)
+
+        if deduped:
+            return "\n".join(deduped)
+        return ""
     return str(content)
+
+
+def _suppress_agentscope_stdout(agent) -> None:
+    """
+    Disable AgentScope's built-in terminal printing.
+
+    The CLI already renders responses via _print_agent; without this, output
+    appears twice (AgentScope `DAAP: ...` + CLI rendering).
+    """
+    async def _quiet_print(*_args, **_kwargs):
+        return None
+
+    try:
+        agent.print = _quiet_print
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -392,7 +425,7 @@ async def _run_agent_turn(session: Session) -> tuple[str, dict]:
 # Identity helpers
 # ---------------------------------------------------------------------------
 
-def _build_welcome_line(user_id: str, topology_store) -> str:
+def _build_welcome_line(user_id: str, topology_store, profile_facts: list[str] | None = None) -> str:
     """Assemble 'Welcome back, X — N runs · optimizer active · M memory facts'."""
     display = user_id.replace("-", " ").title()
     segments: list[str] = []
@@ -411,16 +444,136 @@ def _build_welcome_line(user_id: str, topology_store) -> str:
     except Exception:
         pass
 
-    try:
-        from daap.memory.reader import load_user_profile
-        facts = load_user_profile(user_id)
-        if facts:
-            segments.append(f"{len(facts)} memory fact{'s' if len(facts) != 1 else ''}")
-    except Exception:
-        pass
+    if profile_facts:
+        segments.append(f"{len(profile_facts)} memory fact{'s' if len(profile_facts) != 1 else ''}")
 
     suffix = " · ".join(segments)
     return f"Welcome back, {display} — {suffix}" if suffix else f"Welcome back, {display}"
+
+
+def _run_skill_create_wizard(print_fn) -> None:
+    """Interactive wizard to create a new skill directory and register it."""
+    from pathlib import Path
+
+    from daap.skills.manager import SkillValidationError, get_skill_manager
+
+    print_fn("Skill creator — press Ctrl+C to cancel")
+
+    try:
+        while True:
+            name = input("Name: ").strip()
+            if not name:
+                print_fn("Name is required.")
+                continue
+            name = re.sub(r"[^a-zA-Z0-9-]", "-", name).strip("-").lower()
+            if name:
+                break
+            print_fn("Invalid name. Use letters, numbers, and hyphens.")
+
+        while True:
+            description = input("Description (one line): ").strip()
+            if description:
+                break
+            print_fn("Description is required.")
+
+        targets_input = input("Targets [all/master/subagent, default=all]: ").strip().lower()
+        targets = targets_input if targets_input in {"all", "master", "subagent"} else "all"
+
+        default_dir = str(Path.home() / ".daap" / "skills" / name)
+        dir_input = input(f"Save to dir [{default_dir}]: ").strip()
+        save_dir = Path(dir_input if dir_input else default_dir).expanduser()
+
+        print_fn("Skill body (enter '.' on its own line to finish):")
+        body_lines: list[str] = []
+        while True:
+            line = input("> ")
+            if line.strip() == ".":
+                break
+            body_lines.append(line)
+        body = "\n".join(body_lines).strip()
+
+        skill_md = f"---\nname: {name}\ndescription: {description}\n---\n\n{body}\n"
+        print_fn(f"Preview -> {save_dir}\\SKILL.md")
+        print(skill_md)
+
+        confirm = input("Write? [y/N]: ").strip().lower()
+        if confirm != "y":
+            print_fn("Cancelled.")
+            return
+
+        save_dir.mkdir(parents=True, exist_ok=True)
+        (save_dir / "SKILL.md").write_text(skill_md, encoding="utf-8")
+
+        manager = get_skill_manager()
+        registered_name, _ = manager.add_skill(str(save_dir), targets=targets, persist=True)
+        print_fn(f"Skill '{registered_name}' created and registered.")
+    except KeyboardInterrupt:
+        print()
+        print_fn("Skill creation cancelled.")
+    except SkillValidationError as exc:
+        print_fn(f"Skill error: {exc}")
+    except Exception as exc:
+        print_fn(f"Skill creation failed: {exc}")
+
+
+def _handle_skill_command(raw_input: str, print_fn) -> None:
+    """Dispatch /skill subcommands: add, remove, create."""
+    from daap.skills.manager import SkillValidationError, get_skill_manager
+
+    command = raw_input.lstrip("/")
+    try:
+        parts = shlex.split(command)
+    except ValueError:
+        parts = command.split()
+
+    if len(parts) < 2:
+        print_fn("Usage: /skill add <path> [master|subagent|all] | /skill remove <path> | /skill create")
+        return
+
+    sub = parts[1].lower()
+    manager = get_skill_manager()
+
+    if sub == "add":
+        if len(parts) < 3:
+            print_fn("Usage: /skill add <path> [master|subagent|all]")
+            return
+        directory = parts[2]
+        targets = parts[3].lower() if len(parts) >= 4 else "all"
+        if targets not in {"all", "master", "subagent"}:
+            print_fn("Usage: /skill add <path> [master|subagent|all]")
+            return
+        try:
+            name, was_new = manager.add_skill(directory, targets=targets, persist=True)
+            if not was_new:
+                print_fn(f"Skill '{name}' already registered.")
+                return
+            target_display = targets if targets != "all" else "master, subagent"
+            print_fn(f"Skill '{name}' registered [{target_display}].")
+        except SkillValidationError as exc:
+            print_fn(f"Skill error: {exc}")
+        except Exception as exc:
+            print_fn(f"Skill error: {exc}")
+        return
+
+    if sub == "remove":
+        if len(parts) < 3:
+            print_fn("Usage: /skill remove <path>")
+            return
+        directory = parts[2]
+        try:
+            name = manager.remove_skill(directory, persist=True)
+            print_fn(f"Skill '{name}' removed.")
+        except KeyError:
+            print_fn(f"Skill not found: {directory}")
+        except Exception as exc:
+            print_fn(f"Skill error: {exc}")
+        return
+
+    if sub == "create":
+        _run_skill_create_wizard(print_fn)
+        return
+
+    print_fn(f"Unknown /skill subcommand: '{sub}'. Try: add, remove, create")
 
 
 # ---------------------------------------------------------------------------
@@ -446,7 +599,18 @@ async def main():
     session.token_tracker = TokenTracker()
 
     if not is_new_user:
-        _print_system(_build_welcome_line(user_id, topology_store))
+        profile_facts: list[str] = []
+        try:
+            from daap.memory.config import check_memory_available
+            from daap.memory.reader import load_user_profile
+            ok, _ = check_memory_available()
+            if ok:
+                profile_facts = load_user_profile(user_id)
+        except Exception:
+            pass
+        _print_system(_build_welcome_line(user_id, topology_store, profile_facts))
+        for fact in profile_facts:
+            _print_system(f"  · {fact}")
 
     # MCP servers — start all configured, non-blocking on failure
     mcp_manager = None
@@ -491,8 +655,29 @@ async def main():
         user_context=user_context,
         tracker=session.token_tracker,
     )
+    _suppress_agentscope_stdout(session.master_agent)
+    try:
+        from daap.skills.manager import get_skill_manager
+
+        get_skill_manager().bind_toolkit(toolkit, target="master")
+    except Exception:
+        pass
     from daap.spec.resolver import MODEL_REGISTRY
     _print_system(f"Session {session.session_id} ready | Master: {MODEL_REGISTRY['powerful']}")
+    try:
+        from daap.skills.manager import get_skill_manager
+
+        skill_manager = get_skill_manager()
+        all_dirs = sorted(
+            set(skill_manager.list_skill_dirs("master"))
+            | set(skill_manager.list_skill_dirs("subagent"))
+        )
+        if not all_dirs:
+            _print_system("No skills found. Use /skill add <path> or drop skills in ~/.daap/skills/")
+        else:
+            _print_system(f"Skills loaded: {len(all_dirs)}")
+    except Exception:
+        pass
 
     try:
         while True:
@@ -517,7 +702,7 @@ async def main():
                 break
 
             if cmd == "help":
-                _print_system("Commands: /help /approve /cheaper /cancel /mcp /skills /profile /raw /clean /quit")
+                _print_system("Commands: /help /approve /cheaper /cancel /mcp /skills /skill /profile /raw /clean /quit")
                 continue
 
             if cmd == "raw":
@@ -555,6 +740,10 @@ async def main():
                     _print_system("No MCP servers connected. Configure servers in ~/.daap/mcpx.json")
                 continue
 
+            if cmd.startswith("skill ") or cmd == "skill":
+                _handle_skill_command(user_input.strip(), _print_system)
+                continue
+
             if cmd == "skills":
                 try:
                     from daap.skills.manager import get_skill_manager
@@ -572,7 +761,7 @@ async def main():
                                 targets.append("subagent")
                             print(f"  {d}  [{', '.join(targets)}]")
                     else:
-                        _print_system("No skills configured. Add skill directories to ~/.daap/skills.json")
+                        _print_system("No skills configured. Use /skill add <path> or /skill create")
                 except Exception as exc:
                     _print_system(f"Skills unavailable: {exc}")
                 continue
