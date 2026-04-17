@@ -802,8 +802,8 @@ async def _remote_main(args: argparse.Namespace) -> None:
 
             async def _recv_loop():
                 """Background task: receive server events and render them."""
+                nonlocal raw_output
                 pending_plan: dict | None = None
-                nonlocal raw_output, pending_plan
 
                 async for raw in ws:
                     event = json.loads(raw)
