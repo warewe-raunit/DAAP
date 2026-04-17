@@ -143,7 +143,7 @@ def _build_master_operator_config(master_model: str | None) -> dict | None:
         "provider": DEFAULT_OPERATOR_PROVIDER,
         "base_url": OPENROUTER_BASE_URL,
         "api_key_env": DEFAULT_OPERATOR_KEY_ENV,
-        "model_map": {"smart": master_model.strip()},
+        "model_map": {"powerful": master_model.strip()},
     }
 
 
@@ -313,6 +313,44 @@ async def get_topology(session_id: str):
     return {
         "topology": session.pending_topology,
         "estimate": session.pending_estimate,
+    }
+
+
+@app.get("/api/v1/topologies/{user_id}")
+async def list_user_topologies(user_id: str, limit: int = 10):
+    """List saved topologies for a user, newest first."""
+    import datetime
+    topos = topology_store.list_topologies(user_id)[:limit]
+    return {
+        "user_id": user_id,
+        "topologies": [
+            {
+                "topology_id": t.topology_id,
+                "name": t.name or "(unnamed)",
+                "updated_at": datetime.datetime.fromtimestamp(t.updated_at).strftime("%Y-%m-%d %H:%M"),
+                "version": t.version,
+            }
+            for t in topos
+        ],
+    }
+
+
+@app.get("/api/v1/topologies/{user_id}/{topology_id}/runs")
+async def list_topology_runs(user_id: str, topology_id: str, limit: int = 5):
+    """List recent runs for a topology."""
+    import datetime
+    runs = topology_store.get_runs(topology_id, limit=limit)
+    return {
+        "topology_id": topology_id,
+        "runs": [
+            {
+                "run_id": r.run_id,
+                "ran_at": datetime.datetime.fromtimestamp(r.ran_at).strftime("%Y-%m-%d %H:%M"),
+                "success": r.success,
+                "latency_seconds": round(r.latency_seconds, 1),
+            }
+            for r in runs
+        ],
     }
 
 

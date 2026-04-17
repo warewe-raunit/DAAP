@@ -978,13 +978,22 @@ async def _remote_main(args: argparse.Namespace) -> None:
                             _print_system("Memory: could not reach server")
                         continue
 
-                    elif cmd == "history" or cmd == "topology":
-                        _print_system("Topology history lives on the server.")
-                        _print_system(f"View via: curl {api_url}/topology/{session_id}")
-                        continue
-
-                    elif cmd.startswith("topology load"):
-                        _print_system("Topology load not supported in remote mode — ask the agent to re-run a previous task.")
+                    elif cmd == "history" or cmd == "topology" or cmd.startswith("topology"):
+                        try:
+                            async with httpx.AsyncClient(timeout=5) as hc:
+                                r = await hc.get(f"{api_url}/api/v1/topologies/{user_id}")
+                                topos = r.json().get("topologies", []) if r.status_code == 200 else []
+                                if not topos:
+                                    _print_system("No topologies saved yet.")
+                                else:
+                                    _print_system(f"Saved topologies ({len(topos)}):")
+                                    for t in topos:
+                                        runs_r = await hc.get(f"{api_url}/api/v1/topologies/{user_id}/{t['topology_id']}/runs")
+                                        runs = runs_r.json().get("runs", []) if runs_r.status_code == 200 else []
+                                        run_label = f"{len(runs)} run{'s' if len(runs) != 1 else ''}" if runs else "no runs"
+                                        print(f"  {t['topology_id'][:12]}  {t['updated_at']}  {t['name']}  [{run_label}]")
+                        except Exception as exc:
+                            _print_system(f"Could not fetch topologies: {exc}")
                         continue
 
                     elif cmd.startswith("memory"):
