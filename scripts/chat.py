@@ -1053,7 +1053,7 @@ async def _remote_main(args: argparse.Namespace) -> None:
                             _print_system(f"Detected feedback → rated {stars} ({detected}/5). Optimizer updated.")
                             _print_system("If wrong, use /rate <1-5> to correct.")
                             _last_result_received = False
-                            continue
+                            # Don't continue — fall through so message also goes to agent
 
                     elif cmd == "clear":
                         _save_session(user_id, session_id, [])
@@ -1575,7 +1575,7 @@ async def main(args: argparse.Namespace | None = None):
                     stars = "★" * detected + "☆" * (5 - detected)
                     _print_system(f"Detected feedback → rated {stars} ({detected}/5). Optimizer updated.")
                     _print_system("If wrong, use /rate <1-5> to correct.")
-                    continue
+                    # Don't continue — fall through so the message also goes to agent
 
             # ------------------------------------------------------------------
             # Normal message to agent
