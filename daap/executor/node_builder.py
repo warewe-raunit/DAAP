@@ -65,6 +65,8 @@ class BuiltNode:
     agent_factory: object | None = None
     # Token tracker — forwarded to consolidation so those LLM calls are counted
     tracker: TokenTracker | None = None
+    # Concrete model ID — used for source attribution in node output XML tags
+    model_id: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -220,4 +222,5 @@ async def build_node(
         operator_api_key_env=resolved_node.operator_api_key_env,
         agent_factory=_spawn_agent,
         tracker=tracker,
+        model_id=resolved_node.concrete_model_id,
     )

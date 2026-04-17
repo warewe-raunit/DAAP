@@ -62,8 +62,9 @@ def make_built_node(node_id, response="mock output", parallel_instances=1) -> Bu
         agent=MockAgent(node_id, response),
         parallel_instances=parallel_instances,
         consolidation_func=None,
+        consolidation_strategy=None,
         agent_mode="single",
-        operator_provider="anthropic",
+        operator_provider="openrouter",
         operator_base_url=None,
         operator_api_key_env="OPENROUTER_API_KEY",
     )
@@ -164,8 +165,9 @@ async def test_node_failure_returns_error():
                 agent=AlwaysFailAgent(resolved_node.node_id),
                 parallel_instances=1,
                 consolidation_func=None,
+                consolidation_strategy=None,
                 agent_mode="single",
-                operator_provider="anthropic",
+                operator_provider="openrouter",
                 operator_base_url=None,
                 operator_api_key_env="OPENROUTER_API_KEY",
             )
@@ -194,8 +196,9 @@ async def test_retry_on_failure():
                 agent=fail_once,
                 parallel_instances=1,
                 consolidation_func=None,
+                consolidation_strategy=None,
                 agent_mode="single",
-                operator_provider="anthropic",
+                operator_provider="openrouter",
                 operator_base_url=None,
                 operator_api_key_env="OPENROUTER_API_KEY",
             )
@@ -249,8 +252,9 @@ async def test_data_flows_between_nodes():
             agent=RecordingAgent(resolved_node.node_id, resp),
             parallel_instances=resolved_node.parallel_instances,
             consolidation_func=None,
+            consolidation_strategy=None,
             agent_mode="single",
-            operator_provider="anthropic",
+            operator_provider="openrouter",
             operator_base_url=None,
             operator_api_key_env="OPENROUTER_API_KEY",
         )
