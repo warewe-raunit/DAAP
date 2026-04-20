@@ -41,14 +41,22 @@ def _is_inside_cwd(filepath: str, cwd: Path) -> tuple[bool, Path]:
 # ---------------------------------------------------------------------------
 
 async def web_search(query: str, max_results: int = 8) -> ToolResponse:
-    """Search the web for the given query and return structured results.
+    """Search the web using DuckDuckGo and return structured results.
 
-    Args:
-        query:       the search query string
-        max_results: maximum number of results to return (default 8)
+    USE FOR: any web search — Reddit posts, news, company research, LinkedIn
+    profiles, product pages, job listings, competitor analysis.
 
-    Returns:
-        Numbered list of results with title, URL, and snippet.
+    DO NOT USE FOR: reading the content of a page (use WebFetch for that).
+
+    REDDIT PATTERN: include "site:reddit.com" in the query.
+      Recency filter: append "after:YYYY-MM-DD" (e.g. "after:2026-04-13" for
+      the past week). Today is injected into node system prompts by the master.
+
+    ARGS:
+        query:       full search string including any site: or after: operators
+        max_results: number of results (default 8, max ~20)
+
+    RETURNS: numbered list of results with title, URL, and snippet.
     """
     try:
         from ddgs import DDGS
@@ -103,13 +111,18 @@ def _html_to_text(html: str) -> str:
 
 
 async def web_fetch(url: str) -> ToolResponse:
-    """Fetch the content of a web page and return readable plain text.
+    """Fetch the full readable text content of a web page.
 
-    Args:
-        url: the full URL to fetch (must start with http:// or https://)
+    USE FOR: reading a specific URL found via WebSearch — scraping a Reddit
+    thread, reading a blog post, extracting data from a landing page.
 
-    Returns:
-        Plain text content of the page, truncated to 8000 characters.
+    DO NOT USE FOR: searching (use WebSearch instead). Do not guess URLs;
+    only fetch URLs you have already retrieved from WebSearch or the user.
+
+    ARGS:
+        url: full URL starting with http:// or https://
+
+    RETURNS: plain text of the page, stripped of HTML, truncated to 8000 chars.
     """
     if not url.startswith(("http://", "https://")):
         return ToolResponse(content=[TextBlock(
@@ -158,10 +171,19 @@ async def web_fetch(url: str) -> ToolResponse:
 # ---------------------------------------------------------------------------
 
 async def read_file(filepath: str) -> ToolResponse:
-    """Read a local file and return its content.
+    """Read a local file and return its full text content.
 
-    Args:
-        filepath: absolute or relative path to the file
+    USE FOR: reading CSVs, JSON files, text inputs that the user has placed
+    on disk — e.g. a lead list, a prompt template, configuration data.
+
+    DO NOT USE FOR: fetching web pages (use WebFetch) or running computations
+    (use CodeExecution).
+
+    ARGS:
+        filepath: absolute or relative path. Paths outside the working
+                  directory require explicit user permission.
+
+    RETURNS: raw file contents as text.
     """
     try:
         with open(filepath, "r", encoding="utf-8") as f:
@@ -172,11 +194,20 @@ async def read_file(filepath: str) -> ToolResponse:
 
 
 async def write_file(filepath: str, content: str) -> ToolResponse:
-    """Write content to a local file.
+    """Write text content to a local file (creates or overwrites).
 
-    Args:
-        filepath: absolute or relative path to write to
-        content:  text content to write
+    USE FOR: persisting final output to disk — saving a CSV of leads, writing
+    a report, exporting formatted emails or JSON results for downstream use.
+
+    DO NOT USE FOR: reading files (use ReadFile), web requests, or temp
+    scratch work that isn't meant to survive the node's execution.
+
+    ARGS:
+        filepath: absolute or relative path. Paths outside the working
+                  directory require explicit user permission.
+        content:  full text to write; overwrites existing file if present.
+
+    RETURNS: confirmation message with the path written.
     """
     try:
         with open(filepath, "w", encoding="utf-8") as f:
@@ -187,11 +218,27 @@ async def write_file(filepath: str, content: str) -> ToolResponse:
 
 
 async def code_execution(code: str, language: str = "python") -> ToolResponse:
-    """Execute code in a subprocess sandbox.
+    """Execute Python code in a LOCAL subprocess sandbox.
 
-    Args:
-        code:     the code to execute
-        language: programming language (currently only 'python' supported)
+    USE FOR: pure data-processing tasks — parsing JSON/CSV, deduplicating
+    lists, sorting/filtering records, string transformations, arithmetic,
+    reformatting structured data between nodes.
+
+    DO NOT USE FOR: anything requiring network access. There is NO internet,
+    NO requests/httpx/urllib, NO external APIs, NO Reddit/LinkedIn/web access
+    inside this sandbox. Using it for web calls will always raise NameError or
+    ImportError. Use WebSearch or WebFetch for any network operation.
+
+    AVAILABLE: Python stdlib only (json, csv, re, datetime, collections, etc.).
+    NOT AVAILABLE: requests, httpx, pandas, numpy, openai, or any third-party lib.
+
+    TIMEOUT: 10 seconds. Keep code fast; no long loops.
+
+    ARGS:
+        code:     Python source to execute (print() to return output)
+        language: must be "python" (only supported language)
+
+    RETURNS: stdout of the script (up to 2000 chars), or stderr on error.
     """
     if language != "python":
         return ToolResponse(content=[TextBlock(
@@ -315,6 +362,27 @@ def get_tool_registry(
         registry["agentscope.tools.WriteFile"] = _guarded_write
 
     return registry
+
+
+def get_tool_descriptions() -> str:
+    """Return a formatted description block for all built-in tools.
+
+    Built from each tool function's docstring so descriptions stay in sync
+    with the implementation. Used by the master agent system prompt.
+    """
+    # abstract name → implementation function
+    _BUILTIN_FUNCS = {
+        "WebSearch":     web_search,
+        "WebFetch":      web_fetch,
+        "ReadFile":      read_file,
+        "WriteFile":     write_file,
+        "CodeExecution": code_execution,
+    }
+    lines = []
+    for abstract_name, fn in _BUILTIN_FUNCS.items():
+        doc = (fn.__doc__ or "").strip()
+        lines.append(f"**{abstract_name}**\n{doc}")
+    return "\n\n".join(lines)
 
 
 def get_available_tool_names() -> set[str]:

@@ -13,7 +13,7 @@ import json
 from datetime import datetime
 
 from daap.spec.schema import get_topology_json_schema
-from daap.tools.registry import get_available_tool_names
+from daap.tools.registry import get_available_tool_names, get_tool_descriptions
 
 
 def get_master_system_prompt(
@@ -125,20 +125,7 @@ MCP tools use the format: `mcp://service_name/tool_name` (example: `mcp://linked
 
 ### Tool Descriptions (what each tool actually does)
 
-- **WebSearch** — DuckDuckGo text search. Use for all web/Reddit/news searches.
-  Example node instruction: "Search Reddit using WebSearch with query: site:reddit.com <keywords>"
-  For Reddit: `site:reddit.com` + keywords. For recency: append `after:YYYY-MM-DD` to the query.
-
-- **WebFetch** — Fetches and extracts readable text from a URL. Use to scrape a page after WebSearch returns a link.
-
-- **ReadFile** — Reads a local file. Use only for file-based input.
-
-- **WriteFile** — Writes to a local file. Use only for file-based output.
-
-- **CodeExecution** — Runs Python code in a LOCAL subprocess with NO internet access and NO external libraries.
-  ONLY use for: data transformation, string parsing, JSON reshaping, math, sorting.
-  NEVER use for: web requests, API calls, Reddit search, or anything requiring network access.
-  There is no `default_api`, no `requests`, no `httpx` available inside CodeExecution.
+{get_tool_descriptions()}
 
 Model tiers — pick the right tier per node (cost shown per 1M tokens):
 - "fast":     Gemini 2.5 Flash Lite ($0.10 in / $0.40 out) — search, extract, format, tool-heavy nodes
