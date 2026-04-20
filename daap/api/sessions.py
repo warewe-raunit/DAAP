@@ -155,6 +155,17 @@ class SessionStore:
             ))
             conn.commit()
 
+    def load_one(self, session_id: str, ttl_hours: int = _SESSION_TTL_HOURS) -> dict | None:
+        """Return a single session row if it exists and is within TTL, else None."""
+        cutoff = time.time() - ttl_hours * 3600
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT * FROM sessions WHERE session_id = ? AND updated_at >= ?",
+                (session_id, cutoff),
+            ).fetchone()
+        return dict(row) if row else None
+
     def load_active(self, ttl_hours: int = _SESSION_TTL_HOURS) -> list[dict]:
         """Return all sessions updated within the TTL window."""
         cutoff = time.time() - ttl_hours * 3600
@@ -179,6 +190,21 @@ class SessionStore:
             )
             conn.commit()
             return cur.rowcount
+
+
+def _merge_from_row(session: "Session", row: dict) -> None:
+    """Refresh serialisable fields on a live session from a fresh DB row.
+
+    Called by get_session() on every lookup when a store is present so that
+    state written by another worker is visible immediately. Live objects
+    (master_agent, asyncio events, ws callbacks) are left untouched.
+    """
+    session.conversation = json.loads(row["conversation"] or "[]")
+    session.pending_topology = json.loads(row["pending_topology"]) if row["pending_topology"] else None
+    session.pending_estimate = json.loads(row["pending_estimate"]) if row["pending_estimate"] else None
+    session.master_operator_config = json.loads(row["master_operator_config"]) if row["master_operator_config"] else None
+    session.subagent_operator_config = json.loads(row["subagent_operator_config"]) if row["subagent_operator_config"] else None
+    session.execution_result = json.loads(row["execution_result"]) if row["execution_result"] else None
 
 
 def _restore_session(row: dict) -> "Session":
@@ -237,7 +263,26 @@ class SessionManager:
         return session
 
     def get_session(self, session_id: str) -> Session | None:
-        return self._sessions.get(session_id)
+        if self._store is None:
+            return self._sessions.get(session_id)
+
+        # Always read from DB so writes by other workers are visible immediately.
+        row = self._store.load_one(session_id)
+        if row is None:
+            # Expired or never existed — evict stale local entry if present.
+            self._sessions.pop(session_id, None)
+            return None
+
+        local = self._sessions.get(session_id)
+        if local is not None:
+            # Merge fresh serialisable state; keep live objects (agent, events).
+            _merge_from_row(local, row)
+            return local
+
+        # First time this worker sees this session — restore without live objects.
+        session = _restore_session(row)
+        self._sessions[session_id] = session
+        return session
 
     def persist(self, session_id: str) -> None:
         """Flush serialisable session state to the store (no-op if no store)."""
@@ -253,6 +298,23 @@ class SessionManager:
             self._store.delete(session_id)
 
     def list_sessions(self) -> list[dict]:
+        if self._store is not None:
+            # Read from DB so all workers' sessions are visible, not just this
+            # worker's local dict. is_executing is live-only state; omit it.
+            rows = self._store.load_active()
+            return [
+                {
+                    "session_id": r["session_id"],
+                    "created_at": r["created_at"],
+                    "message_count": len(json.loads(r["conversation"] or "[]")),
+                    "has_pending_topology": r["pending_topology"] is not None,
+                    "is_executing": (
+                        self._sessions[r["session_id"]].is_executing
+                        if r["session_id"] in self._sessions else False
+                    ),
+                }
+                for r in rows
+            ]
         return [
             {
                 "session_id": s.session_id,
