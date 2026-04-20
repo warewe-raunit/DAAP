@@ -266,6 +266,7 @@ async def create_session(
         topology_store=topology_store,
         daap_memory=memory,
         rl_optimizer=optimizer,
+        session_store=_session_store,
     )
     session.master_agent = create_master_agent_with_toolkit(
         toolkit,
@@ -538,6 +539,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str, token: str |
                 topology_store=topology_store,
                 daap_memory=memory,
                 rl_optimizer=optimizer,
+                session_store=_session_store,
             )
             session.master_agent = create_master_agent_with_toolkit(
                 toolkit,

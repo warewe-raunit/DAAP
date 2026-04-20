@@ -117,9 +117,15 @@ class SessionStore:
                     pending_estimate        TEXT,
                     master_operator_config  TEXT,
                     subagent_operator_config TEXT,
-                    execution_result        TEXT
+                    execution_result        TEXT,
+                    is_executing            INTEGER NOT NULL DEFAULT 0
                 )
             """)
+            # Migrate existing databases that pre-date the is_executing column.
+            try:
+                conn.execute("ALTER TABLE sessions ADD COLUMN is_executing INTEGER NOT NULL DEFAULT 0")
+            except sqlite3.OperationalError:
+                pass  # column already exists
             conn.commit()
 
     def save(self, session: "Session") -> None:
@@ -131,8 +137,8 @@ class SessionStore:
                     (session_id, user_id, created_at, updated_at,
                      conversation, pending_topology, pending_estimate,
                      master_operator_config, subagent_operator_config,
-                     execution_result)
-                VALUES (?,?,?,?,?,?,?,?,?,?)
+                     execution_result, is_executing)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(session_id) DO UPDATE SET
                     updated_at               = excluded.updated_at,
                     conversation             = excluded.conversation,
@@ -140,7 +146,8 @@ class SessionStore:
                     pending_estimate         = excluded.pending_estimate,
                     master_operator_config   = excluded.master_operator_config,
                     subagent_operator_config = excluded.subagent_operator_config,
-                    execution_result         = excluded.execution_result
+                    execution_result         = excluded.execution_result,
+                    is_executing             = excluded.is_executing
             """, (
                 session.session_id,
                 session.user_id,
@@ -152,7 +159,17 @@ class SessionStore:
                 json.dumps(session.master_operator_config) if session.master_operator_config else None,
                 json.dumps(session.subagent_operator_config) if session.subagent_operator_config else None,
                 json.dumps(session.execution_result) if session.execution_result else None,
+                1 if session.is_executing else 0,
             ))
+            conn.commit()
+
+    def set_executing(self, session_id: str, value: bool) -> None:
+        """Targeted write for is_executing — cheaper than a full save()."""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                "UPDATE sessions SET is_executing = ?, updated_at = ? WHERE session_id = ?",
+                (1 if value else 0, time.time(), session_id),
+            )
             conn.commit()
 
     def load_one(self, session_id: str, ttl_hours: int = _SESSION_TTL_HOURS) -> dict | None:
@@ -205,6 +222,7 @@ def _merge_from_row(session: "Session", row: dict) -> None:
     session.master_operator_config = json.loads(row["master_operator_config"]) if row["master_operator_config"] else None
     session.subagent_operator_config = json.loads(row["subagent_operator_config"]) if row["subagent_operator_config"] else None
     session.execution_result = json.loads(row["execution_result"]) if row["execution_result"] else None
+    session.is_executing = bool(row.get("is_executing", 0))
 
 
 def _restore_session(row: dict) -> "Session":
@@ -220,6 +238,7 @@ def _restore_session(row: dict) -> "Session":
     s.master_operator_config = json.loads(row["master_operator_config"]) if row["master_operator_config"] else None
     s.subagent_operator_config = json.loads(row["subagent_operator_config"]) if row["subagent_operator_config"] else None
     s.execution_result = json.loads(row["execution_result"]) if row["execution_result"] else None
+    s.is_executing = bool(row.get("is_executing", 0))
     # master_agent is None — recreated on first WS reconnect (see routes.py)
     return s
 
@@ -308,10 +327,7 @@ class SessionManager:
                     "created_at": r["created_at"],
                     "message_count": len(json.loads(r["conversation"] or "[]")),
                     "has_pending_topology": r["pending_topology"] is not None,
-                    "is_executing": (
-                        self._sessions[r["session_id"]].is_executing
-                        if r["session_id"] in self._sessions else False
-                    ),
+                    "is_executing": bool(r.get("is_executing", 0)),
                 }
                 for r in rows
             ]
@@ -336,6 +352,7 @@ def create_session_scoped_toolkit(
     topology_store=None,
     daap_memory=None,
     rl_optimizer=None,
+    session_store: "SessionStore | None" = None,
 ) -> Toolkit:
     """
     Build a Toolkit with ask_user scoped to this specific session.
@@ -827,6 +844,8 @@ def create_session_scoped_toolkit(
 
             total_nodes = len(resolved.nodes)
             session.is_executing = True
+            if session_store is not None:
+                session_store.set_executing(session.session_id, True)
             session.execution_progress = {
                 "topology_id": topo_id,
                 "status": "running",
@@ -1008,6 +1027,8 @@ def create_session_scoped_toolkit(
             )])
         finally:
             session.is_executing = False
+            if session_store is not None:
+                session_store.set_executing(session.session_id, False)
 
     toolkit.register_tool_function(execute_pending_topology)
 
