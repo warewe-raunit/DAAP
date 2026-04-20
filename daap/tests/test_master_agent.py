@@ -13,13 +13,10 @@ import pytest
 from agentscope.message import Msg
 
 from daap.master.tools import (
-    ask_user,
     clear_last_topology_result,
     create_master_toolkit,
     generate_topology,
     get_last_topology_result,
-    get_pending_questions,
-    resolve_pending_questions,
 )
 from daap.master.prompts import get_master_system_prompt
 from daap.master.agent import MasterAgentTurnResult, parse_turn_result
@@ -78,31 +75,35 @@ TWO_QUESTION_JSON = json.dumps([
 
 @pytest.mark.asyncio
 async def test_ask_user_stores_pending_questions():
-    """ask_user stores questions in module-level state while waiting."""
-    clear_last_topology_result()
+    """ask_user stores questions in per-toolkit state while waiting."""
+    toolkit = create_master_toolkit()
+    ask_user_fn = toolkit.tools["ask_user"].original_func
 
-    task = asyncio.create_task(ask_user(VALID_QUESTIONS_JSON))
+    task = asyncio.create_task(ask_user_fn(VALID_QUESTIONS_JSON))
     await asyncio.sleep(0)  # yield so task runs and stores questions
 
-    pending = get_pending_questions()
+    pending = toolkit.get_pending_questions()
     assert pending is not None
     assert len(pending) == 1
     assert pending[0]["question"] == "What does your company do?"
 
     # Clean up — resolve so the task finishes
-    resolve_pending_questions(["SaaS product"])
+    toolkit.resolve_pending_questions(["SaaS product"])
     await task
 
 
 @pytest.mark.asyncio
 async def test_ask_user_waits_for_resolution():
     """ask_user returns user answers after resolve_pending_questions is called."""
+    toolkit = create_master_toolkit()
+    ask_user_fn = toolkit.tools["ask_user"].original_func
+
     async def _resolve_after_yield():
         await asyncio.sleep(0.01)
-        resolve_pending_questions(["SaaS product"])
+        toolkit.resolve_pending_questions(["SaaS product"])
 
     asyncio.create_task(_resolve_after_yield())
-    result = await ask_user(VALID_QUESTIONS_JSON)
+    result = await ask_user_fn(VALID_QUESTIONS_JSON)
 
     block = result.content[0]
     text = block.text if hasattr(block, "text") else block.get("text", "")
@@ -113,7 +114,9 @@ async def test_ask_user_waits_for_resolution():
 @pytest.mark.asyncio
 async def test_ask_user_handles_invalid_json():
     """ask_user returns an error ToolResponse for invalid JSON input."""
-    result = await ask_user("not valid json {{{")
+    toolkit = create_master_toolkit()
+    ask_user_fn = toolkit.tools["ask_user"].original_func
+    result = await ask_user_fn("not valid json {{{")
     block = result.content[0]
     text = block.text if hasattr(block, "text") else block.get("text", "")
     assert "invalid" in text.lower() or "Invalid" in text
@@ -122,10 +125,13 @@ async def test_ask_user_handles_invalid_json():
 @pytest.mark.asyncio
 async def test_ask_user_questions_have_structure():
     """ask_user stores questions with required keys: question, options, multi_select."""
-    task = asyncio.create_task(ask_user(TWO_QUESTION_JSON))
+    toolkit = create_master_toolkit()
+    ask_user_fn = toolkit.tools["ask_user"].original_func
+
+    task = asyncio.create_task(ask_user_fn(TWO_QUESTION_JSON))
     await asyncio.sleep(0)
 
-    pending = get_pending_questions()
+    pending = toolkit.get_pending_questions()
     assert pending is not None
     assert len(pending) == 2
 
@@ -137,13 +143,16 @@ async def test_ask_user_questions_have_structure():
             assert "label" in opt
             assert "description" in opt
 
-    resolve_pending_questions(["SaaS", "SMB"])
+    toolkit.resolve_pending_questions(["SaaS", "SMB"])
     await task
 
 
 @pytest.mark.asyncio
 async def test_ask_user_for_plan_approval():
     """ask_user can present topology approval options (proceed/cheaper/cancel)."""
+    toolkit = create_master_toolkit()
+    ask_user_fn = toolkit.tools["ask_user"].original_func
+
     approval_questions = json.dumps([
         {
             "question": "Pipeline ready: 4 agents, ~$0.14, ~48s. What would you like to do?",
@@ -157,17 +166,17 @@ async def test_ask_user_for_plan_approval():
         }
     ])
 
-    task = asyncio.create_task(ask_user(approval_questions))
+    task = asyncio.create_task(ask_user_fn(approval_questions))
     await asyncio.sleep(0)
 
-    pending = get_pending_questions()
+    pending = toolkit.get_pending_questions()
     assert pending is not None
     labels = [opt["label"] for opt in pending[0]["options"]]
     assert any("Run" in label or "proceed" in label.lower() for label in labels)
     assert any("cheaper" in label.lower() or "Cheaper" in label for label in labels)
     assert any("Cancel" in label or "cancel" in label for label in labels)
 
-    resolve_pending_questions(["Run it (Recommended)"])
+    toolkit.resolve_pending_questions(["Run it (Recommended)"])
     await task
 
 
@@ -356,32 +365,32 @@ def test_prompt_includes_validation_retry_discipline():
 
 def test_parse_turn_result_detects_pending_questions():
     """parse_turn_result reports is_asking_questions=True when ask_user stored questions."""
-    # Simulate ask_user having stored questions (without actually calling the tool)
-    import daap.master.tools as tools_module
-    tools_module._pending_questions = [
+    # Simulate ask_user having stored questions via a mock toolkit
+    from unittest.mock import MagicMock as _MM
+    mock_toolkit = _MM()
+    mock_toolkit.get_pending_questions.return_value = [
         {
             "question": "What's your product?",
             "options": [{"label": "SaaS", "description": "Software"}],
             "multi_select": False,
         }
     ]
+    mock_master = _MM()
+    mock_master._daap_toolkit = mock_toolkit
 
-    try:
-        msg = make_msg("I need a few details before proceeding.")
-        result = parse_turn_result(msg, master=MagicMock())
+    msg = make_msg("I need a few details before proceeding.")
+    result = parse_turn_result(msg, master=mock_master)
 
-        assert result.is_asking_questions is True
-        assert result.pending_questions is not None
-        assert len(result.pending_questions) == 1
-        assert result.has_topology is False
-        assert result.needs_user_input is True
-    finally:
-        tools_module._pending_questions = None
+    assert result.is_asking_questions is True
+    assert result.pending_questions is not None
+    assert len(result.pending_questions) == 1
+    assert result.has_topology is False
+    assert result.needs_user_input is True
 
 
 def test_parse_turn_result_detects_topology():
     """parse_turn_result reports has_topology=True when generate_topology stored a result."""
-    import daap.master.tools as tools_module
+    from daap.master.tools import _topology_result_var, clear_last_topology_result
 
     fake_topo = {"topology_id": "topo-abc12345", "nodes": [], "edges": []}
     fake_estimate = {
@@ -391,7 +400,7 @@ def test_parse_turn_result_detects_topology():
         "within_budget": True,
         "within_timeout": True,
     }
-    tools_module._last_topology_result = {"topology": fake_topo, "estimate": fake_estimate}
+    _topology_result_var.set({"topology": fake_topo, "estimate": fake_estimate})
 
     try:
         msg = make_msg("Here's the pipeline I designed for you.")
@@ -403,14 +412,13 @@ def test_parse_turn_result_detects_topology():
         assert result.is_asking_questions is False
         assert result.needs_user_input is True
     finally:
-        tools_module._last_topology_result = {"topology": None, "estimate": None}
+        clear_last_topology_result()
 
 
 def test_parse_turn_result_direct_response():
     """parse_turn_result returns direct response when no tools were called."""
-    import daap.master.tools as tools_module
-    tools_module._pending_questions = None
-    tools_module._last_topology_result = {"topology": None, "estimate": None}
+    from daap.master.tools import clear_last_topology_result
+    clear_last_topology_result()
 
     msg = make_msg("Here's a cold email for HR directors at SaaS companies...")
     result = parse_turn_result(msg, master=MagicMock())

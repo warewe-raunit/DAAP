@@ -4,18 +4,21 @@ DAAP WebSocket Handler — manages the master agent conversation loop over WebSo
 Message protocol (JSON over WebSocket):
 
 Client → Server:
-  {"type": "message", "content": "..."}          user chat message
-  {"type": "answer", "answers": ["..."]}          answers to ask_user questions
-  {"type": "make_cheaper"}                        request cheaper topology
-  {"type": "cancel"}                              cancel pending topology
+  {"type": "message", "content": "..."}                      user chat message
+  {"type": "answer", "answers": ["..."]}                     answers to ask_user questions
+  {"type": "permission_response", "granted": true/false}     file access approval
+  {"type": "make_cheaper"}                                   request cheaper topology
+  {"type": "cancel"}                                         cancel pending topology
 
 Server → Client:
-  {"type": "response", "content": "..."}          agent text response
-  {"type": "questions", "questions": [...]}        structured ask_user questions
-  {"type": "plan", "summary": "...", ...}          topology plan awaiting approval
-  {"type": "executing", "topology_id": "..."}      execution started (sent by agent tool)
-  {"type": "result", "output": "...", ...}         execution complete (sent by agent tool)
-  {"type": "error", "message": "..."}              error
+  {"type": "response", "content": "..."}                     agent text response
+  {"type": "questions", "questions": [...]}                  structured ask_user questions
+  {"type": "permission_request", "filepath": "...",
+   "operation": "read"|"write"}                              out-of-cwd file access request
+  {"type": "plan", "summary": "...", ...}                    topology plan awaiting approval
+  {"type": "executing", "topology_id": "..."}                execution started (sent by agent tool)
+  {"type": "result", "output": "...", ...}                   execution complete (sent by agent tool)
+  {"type": "error", "message": "..."}                        error
 """
 
 import asyncio
@@ -26,7 +29,6 @@ from fastapi import WebSocket, WebSocketDisconnect
 from agentscope.message import Msg
 
 from daap.api.sessions import Session
-from daap.master.tools import clear_last_topology_result, get_last_topology_result
 
 logger = logging.getLogger(__name__)
 
@@ -122,6 +124,23 @@ async def _run_agent_with_question_pump(
                     session._resolve_answers(data.get("answers", []))
                 # else: unexpected message type — ignore, agent stays paused
 
+            elif session.pending_permission is not None:
+                # Subagent wants to access a file outside cwd — ask user
+                perm = session.pending_permission
+                await websocket.send_json({
+                    "type": "permission_request",
+                    "filepath": perm["filepath"],
+                    "operation": perm["operation"],
+                })
+
+                raw = await websocket.receive_text()
+                data = json.loads(raw)
+                if data.get("type") == "permission_response":
+                    session._resolve_permission(bool(data.get("granted", False)))
+                else:
+                    # Unexpected message — deny by default
+                    session._resolve_permission(False)
+
             await asyncio.sleep(0.05)
     except Exception:
         agent_task.cancel()
@@ -137,18 +156,18 @@ async def _check_and_send_topology(
     response_text: str,
 ) -> bool:
     """
-    Check if generate_topology was called this turn. If so, store it and
-    send a plan message to the client.
+    Check if generate_topology was called this turn. If so, send a plan
+    message to the client.
+
+    generate_topology stores results directly on the session (inside the agent
+    task) to avoid cross-task ContextVar isolation issues. We just read the flag.
 
     Returns True if a topology was found, False otherwise.
     """
-    topo_result = get_last_topology_result()
-    if topo_result.get("topology") is None:
+    if not session.topology_just_generated:
         return False
 
-    session.pending_topology = topo_result["topology"]
-    session.pending_estimate = topo_result["estimate"]
-    clear_last_topology_result()
+    session.topology_just_generated = False
 
     est = session.pending_estimate or {}
     tracker = getattr(session, "token_tracker", None)
@@ -168,7 +187,7 @@ async def _run_make_cheaper_flow(
     websocket: WebSocket,
     session: Session,
 ) -> None:
-    clear_last_topology_result()
+    session.topology_just_generated = False
     cheaper_prompt = "Make the topology cheaper. Reduce cost while keeping it functional."
     session.conversation.append({"role": "user", "content": cheaper_prompt})
 
@@ -197,6 +216,7 @@ async def handle_websocket(
     session: Session,
     daap_memory=None,
     topology_store=None,
+    persist_fn=None,        # callable(session_id: str) -> None; called after state changes
 ) -> None:
     """
     Handle a full WebSocket conversation with the master agent.
@@ -205,7 +225,8 @@ async def handle_websocket(
     and has a master_agent before calling this function.
 
     daap_memory: optional DaapMemory instance for post-run writes.
-                 None = memory disabled (first-time users, missing keys, etc.)
+    persist_fn:  optional callable to flush session state to persistent store
+                 after each turn and execution.
     """
     await websocket.accept()
 
@@ -244,7 +265,7 @@ async def handle_websocket(
                             })
                             continue
 
-                clear_last_topology_result()
+                session.topology_just_generated = False
 
                 tracker = session.token_tracker
                 if tracker:
@@ -263,9 +284,14 @@ async def handle_websocket(
                         "usage": usage,
                     })
 
+                if persist_fn is not None:
+                    persist_fn(session.session_id)
+
             # ------------------------------------------------------------------
             elif msg_type == "make_cheaper":
                 await _run_make_cheaper_flow(websocket, session)
+                if persist_fn is not None:
+                    persist_fn(session.session_id)
 
             # ------------------------------------------------------------------
             elif msg_type == "cancel":
@@ -275,6 +301,8 @@ async def handle_websocket(
                     "type": "response",
                     "content": "Cancelled. How else can I help?",
                 })
+                if persist_fn is not None:
+                    persist_fn(session.session_id)
 
             # ------------------------------------------------------------------
             else:

@@ -10,8 +10,10 @@ import asyncio
 import json
 import logging
 import secrets
+import sqlite3
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from agentscope.message import TextBlock
 from agentscope.tool import Toolkit, ToolResponse
@@ -42,6 +44,7 @@ class Session:
     # Topology state — stored as raw dict after generate_topology succeeds
     pending_topology: dict | None = None        # raw TopologySpec dict
     pending_estimate: dict | None = None        # estimate data dict
+    topology_just_generated: bool = False       # set by generate_topology wrapper; cleared by ws_handler
 
     # Execution state
     is_executing: bool = False
@@ -59,8 +62,139 @@ class Session:
     pending_questions: list | None = None
     _resolve_answers: object | None = None      # callable injected by create_session_scoped_toolkit
 
+    # File permission state — set by _file_permission_fn, resolved by ws_handler
+    pending_permission: dict | None = None      # {"filepath": str, "operation": str}
+    _resolve_permission: object | None = None   # callable(granted: bool)
+    _file_permission_fn: object | None = None   # async (filepath, op) -> bool
+
     # WebSocket send callback — set by ws_handler so agent tools can stream progress
     _ws_send: object | None = None              # async callable: (dict) -> None
+
+
+# ---------------------------------------------------------------------------
+# Session persistence (SQLite)
+# ---------------------------------------------------------------------------
+
+_SESSION_TTL_HOURS = 24
+
+# Fields serialised to DB. Excludes live objects (agent, callables, asyncio state).
+_PERSIST_FIELDS = (
+    "session_id", "user_id", "created_at",
+    "conversation",
+    "pending_topology", "pending_estimate",
+    "master_operator_config", "subagent_operator_config",
+    "execution_result",
+)
+
+
+class SessionStore:
+    """SQLite-backed persistence for sessions across server restarts.
+
+    Persists serialisable session state so users don't lose work on deploy.
+    TTL: sessions inactive for >24 h are purged automatically.
+    Non-serialisable state (master_agent, asyncio events, ws callbacks) is
+    recreated on reconnect.
+    """
+
+    def __init__(self, db_path: str = "daap_sessions.db"):
+        self.db_path = str(db_path)
+        db_parent = Path(db_path).parent
+        if str(db_parent) not in ("", "."):
+            db_parent.mkdir(parents=True, exist_ok=True)
+        self._init_db()
+
+    def _init_db(self) -> None:
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS sessions (
+                    session_id              TEXT PRIMARY KEY,
+                    user_id                 TEXT NOT NULL DEFAULT 'default',
+                    created_at              REAL NOT NULL,
+                    updated_at              REAL NOT NULL,
+                    conversation            TEXT NOT NULL DEFAULT '[]',
+                    pending_topology        TEXT,
+                    pending_estimate        TEXT,
+                    master_operator_config  TEXT,
+                    subagent_operator_config TEXT,
+                    execution_result        TEXT
+                )
+            """)
+            conn.commit()
+
+    def save(self, session: "Session") -> None:
+        """Upsert serialisable session fields."""
+        now = time.time()
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("""
+                INSERT INTO sessions
+                    (session_id, user_id, created_at, updated_at,
+                     conversation, pending_topology, pending_estimate,
+                     master_operator_config, subagent_operator_config,
+                     execution_result)
+                VALUES (?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(session_id) DO UPDATE SET
+                    updated_at               = excluded.updated_at,
+                    conversation             = excluded.conversation,
+                    pending_topology         = excluded.pending_topology,
+                    pending_estimate         = excluded.pending_estimate,
+                    master_operator_config   = excluded.master_operator_config,
+                    subagent_operator_config = excluded.subagent_operator_config,
+                    execution_result         = excluded.execution_result
+            """, (
+                session.session_id,
+                session.user_id,
+                session.created_at,
+                now,
+                json.dumps(session.conversation),
+                json.dumps(session.pending_topology) if session.pending_topology else None,
+                json.dumps(session.pending_estimate) if session.pending_estimate else None,
+                json.dumps(session.master_operator_config) if session.master_operator_config else None,
+                json.dumps(session.subagent_operator_config) if session.subagent_operator_config else None,
+                json.dumps(session.execution_result) if session.execution_result else None,
+            ))
+            conn.commit()
+
+    def load_active(self, ttl_hours: int = _SESSION_TTL_HOURS) -> list[dict]:
+        """Return all sessions updated within the TTL window."""
+        cutoff = time.time() - ttl_hours * 3600
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT * FROM sessions WHERE updated_at >= ?", (cutoff,)
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def delete(self, session_id: str) -> None:
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("DELETE FROM sessions WHERE session_id = ?", (session_id,))
+            conn.commit()
+
+    def purge_expired(self, ttl_hours: int = _SESSION_TTL_HOURS) -> int:
+        """Hard-delete sessions older than ttl_hours. Returns count deleted."""
+        cutoff = time.time() - ttl_hours * 3600
+        with sqlite3.connect(self.db_path) as conn:
+            cur = conn.execute(
+                "DELETE FROM sessions WHERE updated_at < ?", (cutoff,)
+            )
+            conn.commit()
+            return cur.rowcount
+
+
+def _restore_session(row: dict) -> "Session":
+    """Reconstruct a Session from a persisted DB row (no live objects)."""
+    s = Session(
+        session_id=row["session_id"],
+        user_id=row["user_id"],
+        created_at=row["created_at"],
+    )
+    s.conversation = json.loads(row["conversation"] or "[]")
+    s.pending_topology = json.loads(row["pending_topology"]) if row["pending_topology"] else None
+    s.pending_estimate = json.loads(row["pending_estimate"]) if row["pending_estimate"] else None
+    s.master_operator_config = json.loads(row["master_operator_config"]) if row["master_operator_config"] else None
+    s.subagent_operator_config = json.loads(row["subagent_operator_config"]) if row["subagent_operator_config"] else None
+    s.execution_result = json.loads(row["execution_result"]) if row["execution_result"] else None
+    # master_agent is None — recreated on first WS reconnect (see routes.py)
+    return s
 
 
 # ---------------------------------------------------------------------------
@@ -68,27 +202,54 @@ class Session:
 # ---------------------------------------------------------------------------
 
 class SessionManager:
-    """
-    In-memory session store.
+    """In-memory session index backed by optional SQLite persistence.
 
-    Phase 1: dict in memory — sessions lost on server restart.
-    Phase 3: Redis-backed sessions via AgentScope Runtime.
+    On startup, loads active sessions from the store so users don't lose work
+    across server restarts. master_agent is recreated lazily on WS reconnect.
+    TTL: sessions inactive for >24 h are dropped from memory and DB.
     """
 
-    def __init__(self):
+    def __init__(self, store: SessionStore | None = None):
         self._sessions: dict[str, Session] = {}
+        self._store = store
+        if store is not None:
+            self._load_from_store(store)
+
+    def _load_from_store(self, store: SessionStore) -> None:
+        purged = store.purge_expired()
+        if purged:
+            logger.info("SessionManager: purged %d expired sessions from store", purged)
+        for row in store.load_active():
+            session = _restore_session(row)
+            self._sessions[session.session_id] = session
+        if self._sessions:
+            logger.info(
+                "SessionManager: restored %d sessions from store", len(self._sessions)
+            )
 
     def create_session(self, user_id: str = "default") -> Session:
         session_id = secrets.token_urlsafe(32)
         session = Session(session_id=session_id, created_at=time.time(), user_id=user_id)
         self._sessions[session_id] = session
+        if self._store is not None:
+            self._store.save(session)
         return session
 
     def get_session(self, session_id: str) -> Session | None:
         return self._sessions.get(session_id)
 
+    def persist(self, session_id: str) -> None:
+        """Flush serialisable session state to the store (no-op if no store)."""
+        if self._store is None:
+            return
+        session = self._sessions.get(session_id)
+        if session is not None:
+            self._store.save(session)
+
     def delete_session(self, session_id: str) -> None:
         self._sessions.pop(session_id, None)
+        if self._store is not None:
+            self._store.delete(session_id)
 
     def list_sessions(self) -> list[dict]:
         return [
@@ -154,34 +315,68 @@ def create_session_scoped_toolkit(
 
     async def generate_topology(topology_json: str) -> ToolResponse:
         """Session-scoped topology generation with optional operator/model injection."""
+        from daap.master.tools import _topology_result_var, clear_last_topology_result
+
         selected = session.subagent_operator_config
         if not selected:
-            return await generate_topology_tool(topology_json)
-
-        try:
-            topology_dict = json.loads(topology_json)
-        except json.JSONDecodeError:
-            return await generate_topology_tool(topology_json)
-
-        # Enforce user-selected default operator/model map for all subagents.
-        topology_dict["operator_config"] = _merge_operator_config(
-            topology_dict.get("operator_config"),
-            selected,
-        )
-
-        # Node-level overrides still exist, but user selection should win.
-        for node in topology_dict.get("nodes", []):
-            if not isinstance(node, dict):
-                continue
-            if node.get("operator_override") is not None:
-                node["operator_override"] = _merge_operator_config(
-                    node.get("operator_override"),
+            result = await generate_topology_tool(topology_json)
+        else:
+            try:
+                topology_dict = json.loads(topology_json)
+            except json.JSONDecodeError:
+                result = await generate_topology_tool(topology_json)
+            else:
+                # Enforce user-selected default operator/model map for all subagents.
+                topology_dict["operator_config"] = _merge_operator_config(
+                    topology_dict.get("operator_config"),
                     selected,
                 )
 
-        return await generate_topology_tool(json.dumps(topology_dict))
+                # Node-level overrides still exist, but user selection should win.
+                for node in topology_dict.get("nodes", []):
+                    if not isinstance(node, dict):
+                        continue
+                    if node.get("operator_override") is not None:
+                        node["operator_override"] = _merge_operator_config(
+                            node.get("operator_override"),
+                            selected,
+                        )
+
+                result = await generate_topology_tool(json.dumps(topology_dict))
+
+        # ContextVar is only visible within the same asyncio task.
+        # We're inside the agent task here — read it now and store on session
+        # so ws_handler can access it after the task completes.
+        topo_result = _topology_result_var.get()
+        if topo_result["topology"] is not None:
+            session.pending_topology = topo_result["topology"]
+            session.pending_estimate = topo_result["estimate"]
+            session.topology_just_generated = True
+            clear_last_topology_result()
+
+        return result
 
     toolkit.register_tool_function(generate_topology)
+
+    # Per-session file permission state
+    _perm_event: asyncio.Event = asyncio.Event()
+    _perm_state: dict = {"granted": None}
+
+    async def _file_permission_fn(filepath: str, operation: str) -> bool:
+        """Pause agent, ask user via WS to approve out-of-cwd file access."""
+        session.pending_permission = {"filepath": filepath, "operation": operation}
+        _perm_event.clear()
+        _perm_state["granted"] = None
+        await _perm_event.wait()
+        session.pending_permission = None
+        return bool(_perm_state["granted"])
+
+    def _resolve_permission(granted: bool) -> None:
+        _perm_state["granted"] = granted
+        _perm_event.set()
+
+    session._resolve_permission = _resolve_permission
+    session._file_permission_fn = _file_permission_fn
 
     # Per-session state captured by the closure
     _answer_event: asyncio.Event = asyncio.Event()
@@ -424,6 +619,7 @@ def create_session_scoped_toolkit(
                     tracker=session.token_tracker,
                     daap_memory=daap_memory,
                     user_id=session.user_id,
+                    permission_fn=session._file_permission_fn,
                 )
 
                 result_payload = {
@@ -638,6 +834,7 @@ def create_session_scoped_toolkit(
                 on_node_complete=_on_node_complete,
                 daap_memory=daap_memory,
                 user_id=session.user_id,
+                permission_fn=session._file_permission_fn,
             )
 
             session.execution_result = {

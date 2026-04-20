@@ -5,10 +5,10 @@ Both registered via AgentScope Toolkit. The agent calls these instead of
 producing plain text — the API layer uses tool calls as reliable signals,
 not fragile heuristics (no question-mark detection, no guessing).
 
-Module-level state:
+State model:
   _topology_result_var  — ContextVar (task-scoped): isolates concurrent sessions
-  _pending_questions    — set by ask_user while waiting for user input
-  _answer_event         — asyncio.Event signalling when answers arrive
+  ask_user state        — per-toolkit-instance closures (see create_master_toolkit)
+                          API uses session-scoped toolkits from sessions.py instead
 """
 
 import asyncio
@@ -43,9 +43,10 @@ _topology_result_var: ContextVar[dict] = ContextVar(
     default={"topology": None, "estimate": None},
 )
 
-_pending_questions: list | None = None
-_answer_event: asyncio.Event | None = None
-_user_answers: list | None = None
+# Note: ask_user state is now per-toolkit-instance (see create_master_toolkit).
+# The API always uses session-scoped toolkits (create_session_scoped_toolkit in
+# sessions.py) and never reads these globals. Scripts use create_master_toolkit
+# which exposes get/resolve via toolkit attributes.
 
 
 def get_last_topology_result() -> dict:
@@ -57,17 +58,6 @@ def clear_last_topology_result() -> None:
     _topology_result_var.set({"topology": None, "estimate": None})
 
 
-def get_pending_questions() -> list | None:
-    """API layer calls this to check if agent is waiting for user input."""
-    return _pending_questions
-
-
-def resolve_pending_questions(answers: list[str]) -> None:
-    """API layer calls this when the user has answered the structured questions."""
-    global _user_answers
-    _user_answers = answers
-    if _answer_event is not None:
-        _answer_event.set()
 
 
 # ---------------------------------------------------------------------------
@@ -108,8 +98,6 @@ async def generate_topology(topology_json: str) -> ToolResponse:
         On success: the execution plan summary with cost estimate.
         On validation failure: specific errors with fix suggestions.
     """
-    global _last_topology_result
-
     # 1. Parse JSON
     try:
         topology_dict = json.loads(topology_json)
@@ -194,94 +182,6 @@ async def generate_topology(topology_json: str) -> ToolResponse:
 # Tool: ask_user
 # ---------------------------------------------------------------------------
 
-async def ask_user(questions_json: str) -> ToolResponse:
-    """Ask the user clarifying questions before proceeding.
-
-    Call this tool when you need more information from the user to do your
-    job well. DO NOT guess or make assumptions about their product, audience,
-    preferences, or requirements. Ask instead.
-
-    Use this BEFORE calling generate_topology if the user's request is
-    missing critical details like:
-    - What their product/service does
-    - Who their target audience is (industry, company size, job titles)
-    - How many leads/results they want
-    - What format they want output in (emails, report, list)
-    - Any specific preferences or constraints
-
-    Also use this when presenting a topology plan to offer the user
-    choices: proceed, make cheaper, modify, or cancel.
-
-    Args:
-        questions_json: A JSON string containing an array of questions.
-            Each question has:
-            - "question": the question text
-            - "options": array of options, each with "label" and "description"
-            - "multi_select": boolean, true if user can pick multiple options
-
-            Example:
-            [
-                {
-                    "question": "What does your company do?",
-                    "options": [
-                        {"label": "SaaS product", "description": "Software as a service"},
-                        {"label": "Consulting/agency", "description": "Professional services"},
-                        {"label": "Other", "description": "Something else"}
-                    ],
-                    "multi_select": false
-                }
-            ]
-
-            Keep it to 1-4 questions. Don't interrogate the user.
-            If you recommend a specific option, add "(Recommended)" to the label.
-
-    Returns:
-        The user's answers to your questions.
-    """
-    global _pending_questions, _answer_event, _user_answers
-
-    try:
-        questions = json.loads(questions_json)
-    except json.JSONDecodeError as e:
-        return ToolResponse(content=[TextBlock(
-            type="text",
-            text=f"Invalid questions JSON: {e}",
-        )])
-
-    if not isinstance(questions, list) or len(questions) == 0:
-        return ToolResponse(content=[TextBlock(
-            type="text",
-            text="questions_json must be a non-empty JSON array of question objects.",
-        )])
-
-    # Store questions and create event — API layer reads these
-    _pending_questions = questions
-    _answer_event = asyncio.Event()
-    _user_answers = None
-
-    # Wait for API layer to deliver answers via resolve_pending_questions()
-    await _answer_event.wait()
-
-    answers = _user_answers
-    _pending_questions = None
-    _answer_event = None
-    _user_answers = None
-
-    if answers is None:
-        return ToolResponse(content=[TextBlock(
-            type="text",
-            text="The user did not provide answers. Proceed with what you know or ask again.",
-        )])
-
-    answer_lines = []
-    for i, q in enumerate(questions):
-        a = answers[i] if i < len(answers) else "(no answer)"
-        answer_lines.append(f"Q: {q.get('question', '')}\nA: {a}")
-
-    return ToolResponse(content=[TextBlock(
-        type="text",
-        text="User's answers:\n\n" + "\n\n".join(answer_lines),
-    )])
 
 
 def register_skill(directory: str, targets: str = "all") -> str:
@@ -310,14 +210,107 @@ def register_skill(directory: str, targets: str = "all") -> str:
 # ---------------------------------------------------------------------------
 
 def create_master_toolkit() -> Toolkit:
-    """Create the Toolkit for the master agent with all registered tools."""
+    """Create the Toolkit for the master agent with per-instance ask_user state.
+
+    For CLI/script use (single session). The API always uses session-scoped
+    toolkits from create_session_scoped_toolkit() in sessions.py instead.
+
+    The returned Toolkit has two extra attributes for script-layer coordination:
+        toolkit.get_pending_questions() -> list | None
+        toolkit.resolve_pending_questions(answers: list) -> None
+    """
     toolkit = Toolkit()
     get_skill_manager().bind_toolkit(toolkit, target="master")
     apply_configured_skills(toolkit, target="master")
+
+    # Per-toolkit ask_user state — no module-level globals, safe for concurrent toolkits.
+    _state: dict = {"questions": None, "event": None, "answers": None}
+
+    async def ask_user(questions_json: str) -> ToolResponse:
+        """Ask the user clarifying questions before proceeding.
+
+        Call this tool when you need more information from the user to do your
+        job well. DO NOT guess or make assumptions about their product, audience,
+        preferences, or requirements. Ask instead.
+
+        Use this BEFORE calling generate_topology if the user's request is
+        missing critical details like:
+        - What their product/service does
+        - Who their target audience is (industry, company size, job titles)
+        - How many leads/results they want
+        - What format they want output in (emails, report, list)
+        - Any specific preferences or constraints
+
+        Also use this when presenting a topology plan to offer the user
+        choices: proceed, make cheaper, modify, or cancel.
+
+        Args:
+            questions_json: A JSON string containing an array of questions.
+                Each question has:
+                - "question": the question text
+                - "options": array of options, each with "label" and "description"
+                - "multi_select": boolean, true if user can pick multiple options
+
+                Keep it to 1-4 questions. Don't interrogate the user.
+                If you recommend a specific option, add "(Recommended)" to the label.
+
+        Returns:
+            The user's answers to your questions.
+        """
+        try:
+            questions = json.loads(questions_json)
+        except json.JSONDecodeError as e:
+            return ToolResponse(content=[TextBlock(type="text", text=f"Invalid questions JSON: {e}")])
+
+        if not isinstance(questions, list) or len(questions) == 0:
+            return ToolResponse(content=[TextBlock(
+                type="text",
+                text="questions_json must be a non-empty JSON array of question objects.",
+            )])
+
+        _state["questions"] = questions
+        _state["event"] = asyncio.Event()
+        _state["answers"] = None
+
+        await _state["event"].wait()
+
+        answers = _state["answers"]
+        _state["questions"] = None
+        _state["event"] = None
+        _state["answers"] = None
+
+        if answers is None:
+            return ToolResponse(content=[TextBlock(
+                type="text",
+                text="The user did not provide answers. Proceed with what you know or ask again.",
+            )])
+
+        answer_lines = []
+        for i, q in enumerate(questions):
+            a = answers[i] if i < len(answers) else "(no answer)"
+            answer_lines.append(f"Q: {q.get('question', '')}\nA: {a}")
+
+        return ToolResponse(content=[TextBlock(
+            type="text",
+            text="User's answers:\n\n" + "\n\n".join(answer_lines),
+        )])
+
+    def get_pending_questions() -> list | None:
+        """Return pending ask_user questions for this toolkit instance."""
+        return _state["questions"]
+
+    def resolve_pending_questions(answers: list) -> None:
+        """Deliver answers for this toolkit instance's pending ask_user call."""
+        _state["answers"] = answers
+        if _state["event"] is not None:
+            _state["event"].set()
+
     toolkit.register_tool_function(generate_topology)
     toolkit.register_tool_function(ask_user)
     toolkit.register_tool_function(register_skill)
-    # Future Phase 2 tools:
-    # toolkit.register_tool_function(query_user_memory)
-    # toolkit.register_tool_function(search_past_runs)
+
+    # Attach state accessors for script-layer coordination (not part of Toolkit API)
+    toolkit.get_pending_questions = get_pending_questions
+    toolkit.resolve_pending_questions = resolve_pending_questions
+
     return toolkit

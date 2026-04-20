@@ -321,7 +321,6 @@ def test_session_scoped_toolkit_attaches_resolver():
 async def test_session_scoped_ask_user_uses_session_state():
     """Session-scoped ask_user stores questions on the session, not module-level."""
     import asyncio
-    from daap.master import tools as master_tools
 
     session = Session(session_id="test-03", created_at=0.0)
     toolkit = create_session_scoped_toolkit(session)
@@ -340,7 +339,6 @@ async def test_session_scoped_ask_user_uses_session_state():
 
     # Questions stored on session, not module-level state
     assert session.pending_questions is not None
-    assert master_tools.get_pending_questions() is None  # module-level untouched
 
     session._resolve_answers(["SaaS"])
     await task

@@ -38,7 +38,6 @@ from daap.master.agent import create_master_agent_with_toolkit
 from daap.master.tools import (
     clear_last_topology_result,
     get_last_topology_result,
-    get_pending_questions,
 )
 from daap.feedback.store import FeedbackStore
 from daap.feedback.collector import collect_run_feedback

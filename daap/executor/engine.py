@@ -94,6 +94,7 @@ async def execute_topology(
     on_node_complete: object | None = None,  # callable(NodeResult)
     daap_memory=None,                        # optional DaapMemory for node prompt enrichment
     user_id: str | None = None,              # optional user_id for per-user memory
+    permission_fn=None,                      # async (filepath, op) -> bool for out-of-cwd file access
 ) -> ExecutionResult:
     """
     Execute a fully resolved topology end-to-end.
@@ -112,7 +113,8 @@ async def execute_topology(
     node_results: list[NodeResult] = []
 
     try:
-        tool_registry = get_tool_registry()
+        from pathlib import Path
+        tool_registry = get_tool_registry(cwd=Path.cwd(), permission_fn=permission_fn)
 
         # Per-execution tracker — creates fresh one if caller didn't supply
         exec_tracker = tracker or TokenTracker()

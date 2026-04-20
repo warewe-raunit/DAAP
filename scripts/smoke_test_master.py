@@ -29,8 +29,6 @@ from daap.master.agent import create_master_agent
 from daap.master.tools import (
     clear_last_topology_result,
     get_last_topology_result,
-    get_pending_questions,
-    resolve_pending_questions,
 )
 
 PROMPTS = [
@@ -61,12 +59,15 @@ AUTO_RESOLVE_ANSWERS = [
 ]
 
 
-async def _auto_resolve_pending_questions(agent_task: asyncio.Task) -> None:
+async def _auto_resolve_pending_questions(
+    agent_task: asyncio.Task,
+    toolkit,
+) -> None:
     """Resolve ask_user prompts as soon as they appear while the agent is running."""
     while not agent_task.done():
-        if get_pending_questions() is not None:
+        if toolkit.get_pending_questions() is not None:
             print("  → ask_user called — auto-resolving questions")
-            resolve_pending_questions(AUTO_RESOLVE_ANSWERS)
+            toolkit.resolve_pending_questions(AUTO_RESOLVE_ANSWERS)
             return
         await asyncio.sleep(0.1)
 
@@ -80,10 +81,11 @@ async def run_one(prompt_spec: dict) -> dict:
 
     clear_last_topology_result()
     master = create_master_agent()
+    toolkit = master._daap_toolkit
 
     msg = Msg(name="user", content=prompt_spec["prompt"], role="user")
     agent_task = asyncio.create_task(master(msg))
-    resolver_task = asyncio.create_task(_auto_resolve_pending_questions(agent_task))
+    resolver_task = asyncio.create_task(_auto_resolve_pending_questions(agent_task, toolkit))
 
     response_msg = await agent_task
     await resolver_task
@@ -96,7 +98,7 @@ async def run_one(prompt_spec: dict) -> dict:
 
     # Classify what happened
     topo = get_last_topology_result()
-    pending_qs = get_pending_questions()
+    pending_qs = toolkit.get_pending_questions()
 
     if topo.get("topology") is not None:
         actual = "topology"

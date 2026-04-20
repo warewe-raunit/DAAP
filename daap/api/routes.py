@@ -23,7 +23,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from daap.api.auth import require_api_key, validate_ws_token
-from daap.api.sessions import SessionManager, create_session_scoped_toolkit
+from daap.api.sessions import SessionManager, SessionStore, create_session_scoped_toolkit
 from daap.api.topology_routes import (
     router as topology_router,
     set_session_manager as set_topology_session_manager,
@@ -38,7 +38,8 @@ from daap.tools.token_tracker import TokenTracker
 logger = logging.getLogger(__name__)
 
 # Global singletons
-session_manager = SessionManager()
+_session_store = SessionStore("daap_sessions.db")
+session_manager = SessionManager(store=_session_store)
 feedback_store = FeedbackStore()
 topology_store = TopologyStore()
 
@@ -272,6 +273,8 @@ async def create_session(
         operator_config=session.master_operator_config,
         tracker=session.token_tracker,
     )
+    # Persist operator config so the agent can be recreated on reconnect
+    session_manager.persist(session.session_id)
     return {"session_id": session.session_id}
 
 
@@ -517,13 +520,41 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str, token: str |
     if session is None:
         await websocket.close(code=4004, reason="Session not found")
         return
+
+    # Recreate master_agent if session was restored from DB after a restart
     if session.master_agent is None:
-        await websocket.close(code=4005, reason="Session not initialised")
-        return
+        try:
+            memory = _get_memory()
+            optimizer = _get_optimizer()
+            user_context = None
+            if memory:
+                try:
+                    user_context = memory.format_for_master_prompt(session.user_id, "")
+                except Exception:
+                    pass
+            session.token_tracker = TokenTracker()
+            toolkit = create_session_scoped_toolkit(
+                session,
+                topology_store=topology_store,
+                daap_memory=memory,
+                rl_optimizer=optimizer,
+            )
+            session.master_agent = create_master_agent_with_toolkit(
+                toolkit,
+                user_context=user_context,
+                operator_config=session.master_operator_config,
+                tracker=session.token_tracker,
+            )
+            logger.info("Recreated master_agent for restored session %s", session_id)
+        except Exception as exc:
+            logger.error("Failed to recreate agent for session %s: %s", session_id, exc)
+            await websocket.close(code=4005, reason="Session agent recreation failed")
+            return
 
     await handle_websocket(
         websocket,
         session,
         daap_memory=_get_memory(),
         topology_store=topology_store,
+        persist_fn=session_manager.persist,
     )

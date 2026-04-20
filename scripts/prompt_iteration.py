@@ -29,8 +29,6 @@ from daap.master.agent import create_master_agent
 from daap.master.tools import (
     clear_last_topology_result,
     get_last_topology_result,
-    get_pending_questions,
-    resolve_pending_questions,
 )
 
 # ---------------------------------------------------------------------------
@@ -201,12 +199,13 @@ async def run_prompt(spec: dict, semaphore: asyncio.Semaphore) -> dict:
     async with semaphore:
         clear_last_topology_result()
         master = create_master_agent()
+        toolkit = master._daap_toolkit
 
         # Auto-resolve ask_user if triggered (so agent doesn't block forever)
         async def auto_resolve(agent_task: asyncio.Task):
             while not agent_task.done():
-                if get_pending_questions() is not None:
-                    resolve_pending_questions(AUTO_RESOLVE_ANSWERS)
+                if toolkit.get_pending_questions() is not None:
+                    toolkit.resolve_pending_questions(AUTO_RESOLVE_ANSWERS)
                     return
                 await asyncio.sleep(0.1)
 
@@ -232,7 +231,7 @@ async def run_prompt(spec: dict, semaphore: asyncio.Semaphore) -> dict:
         )
 
         topo = get_last_topology_result()
-        pending_qs = get_pending_questions()
+        pending_qs = toolkit.get_pending_questions()
 
         if topo.get("topology") is not None:
             actual = "topology"

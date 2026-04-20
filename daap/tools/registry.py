@@ -12,11 +12,25 @@ Node builder uses values to register tools with AgentScope.
 
 import asyncio
 import re
+from pathlib import Path
 
 import httpx
 from bs4 import BeautifulSoup
 from agentscope.tool import ToolResponse
 from agentscope.message import TextBlock
+
+
+def _is_inside_cwd(filepath: str, cwd: Path) -> tuple[bool, Path]:
+    """Resolve filepath and check if it lives inside cwd. Returns (inside, resolved)."""
+    try:
+        resolved = Path(filepath).resolve()
+    except Exception:
+        return False, Path(filepath)
+    try:
+        resolved.relative_to(cwd.resolve())
+        return True, resolved
+    except ValueError:
+        return False, resolved
 
 
 # ---------------------------------------------------------------------------
@@ -239,8 +253,16 @@ def _get_mcp_manager_safe():
         return None
 
 
-def get_tool_registry() -> dict[str, callable]:
-    """Returns resolved_tool_id → async function mapping."""
+def get_tool_registry(
+    cwd: Path | None = None,
+    permission_fn=None,
+) -> dict[str, callable]:
+    """Returns resolved_tool_id → async function mapping.
+
+    cwd:           working directory; file ops inside it are auto-allowed.
+    permission_fn: async (filepath: str, operation: str) -> bool
+                   called for paths outside cwd. If None, outside-cwd ops are blocked.
+    """
     registry = dict(_TOOL_REGISTRY)
 
     mcp_manager = _get_mcp_manager_safe()
@@ -249,6 +271,44 @@ def get_tool_registry() -> dict[str, callable]:
             registry.update(mcp_manager.get_tool_registry_entries())
         except Exception:
             pass
+
+    if cwd is not None:
+        _cwd = cwd.resolve()
+
+        async def _guarded_read(filepath: str) -> ToolResponse:
+            inside, resolved = _is_inside_cwd(filepath, _cwd)
+            if not inside:
+                if permission_fn is None:
+                    return ToolResponse(content=[TextBlock(
+                        type="text",
+                        text=f"Access denied: '{resolved}' is outside the working directory.",
+                    )])
+                granted = await permission_fn(str(resolved), "read")
+                if not granted:
+                    return ToolResponse(content=[TextBlock(
+                        type="text",
+                        text=f"Permission denied by user for read: '{resolved}'.",
+                    )])
+            return await read_file(filepath)
+
+        async def _guarded_write(filepath: str, content: str) -> ToolResponse:
+            inside, resolved = _is_inside_cwd(filepath, _cwd)
+            if not inside:
+                if permission_fn is None:
+                    return ToolResponse(content=[TextBlock(
+                        type="text",
+                        text=f"Access denied: '{resolved}' is outside the working directory.",
+                    )])
+                granted = await permission_fn(str(resolved), "write")
+                if not granted:
+                    return ToolResponse(content=[TextBlock(
+                        type="text",
+                        text=f"Permission denied by user for write: '{resolved}'.",
+                    )])
+            return await write_file(filepath, content)
+
+        registry["agentscope.tools.ReadFile"] = _guarded_read
+        registry["agentscope.tools.WriteFile"] = _guarded_write
 
     return registry
 

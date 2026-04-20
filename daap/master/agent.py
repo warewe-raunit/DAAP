@@ -22,7 +22,6 @@ from daap.master.tools import (
     clear_last_topology_result,
     create_master_toolkit,
     get_last_topology_result,
-    get_pending_questions,
 )
 from daap.tools.registry import get_available_tool_names
 
@@ -112,7 +111,7 @@ def create_master_agent(
     toolkit = create_master_toolkit()
     model, formatter = _build_model_and_formatter(operator_config, tracker)
 
-    return ReActAgent(
+    agent = ReActAgent(
         name="DAAP",
         sys_prompt=get_master_system_prompt(
             available_tools=get_available_tool_names(),
@@ -124,6 +123,9 @@ def create_master_agent(
         toolkit=toolkit,
         max_iters=15,
     )
+    # Attach toolkit so parse_turn_result can check per-instance ask_user state
+    agent._daap_toolkit = toolkit
+    return agent
 
 
 def create_master_agent_with_toolkit(
@@ -173,7 +175,8 @@ def parse_turn_result(response_msg: Msg, master: ReActAgent) -> MasterAgentTurnR
         else str(response_msg.content)
     )
 
-    pending_qs = get_pending_questions()
+    toolkit = getattr(master, "_daap_toolkit", None)
+    pending_qs = toolkit.get_pending_questions() if toolkit is not None else None
     if pending_qs is not None:
         return MasterAgentTurnResult(
             response_text=text,
