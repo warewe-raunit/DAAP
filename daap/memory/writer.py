@@ -212,9 +212,13 @@ def write_agent_learnings_from_run(
         try:
             role = node_id_to_role.get(nr.node_id, nr.node_id)
             normalized = _normalize_role(role)
+            # Store behavioural metadata only — raw output_text may contain
+            # PII or user data and must not be written to Mem0.
+            outcome = "succeeded" if getattr(nr, "success", True) else "failed"
+            output_len = len(getattr(nr, "output_text", "") or "")
             learning = (
-                f"Node '{normalized}' completed in {nr.latency_seconds:.1f}s. "
-                f"Output: {nr.output_text[:200]}"
+                f"Node '{normalized}' {outcome} in {nr.latency_seconds:.1f}s "
+                f"using {getattr(nr, 'model_id', 'unknown')} ({output_len} chars)."
             )
             memory.store_agent_learning(normalized, learning)
         except Exception as e:

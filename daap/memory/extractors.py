@@ -59,7 +59,8 @@ def extract_run_summary(
     if success:
         parts.append("Execution succeeded.")
     else:
-        err = execution_result.get("error", "unknown error")
+        # Truncate error — full error strings can embed structured data with PII.
+        err = str(execution_result.get("error") or "unknown error")[:120]
         parts.append(f"Execution failed: {err}.")
 
     if user_rating is not None:
@@ -78,15 +79,16 @@ def extract_agent_observation(
     """
     Create per-node observation for agent diary.
 
-    Captures what the agent did, what worked, what to remember.
-    Truncates output to keep storage efficient.
+    Stores only behavioural metadata — NOT raw output content.
+    Raw node output may contain PII, credentials, or user data and must
+    never be written to Mem0.
     """
-    output_preview = node_output[:500] if node_output else "(empty)"
     outcome = "completed" if success else "failed"
+    output_len = len(node_output) if node_output else 0
 
     return (
-        f"As {role} using {model_used}, {outcome} in {latency_seconds:.1f}s. "
-        f"Output preview: {output_preview}"
+        f"As {role} using {model_used}, {outcome} in {latency_seconds:.1f}s "
+        f"({output_len} chars output)."
     )
 
 
