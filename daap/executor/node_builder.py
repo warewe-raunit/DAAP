@@ -143,8 +143,8 @@ async def build_node(
                 )
             if diary_context:
                 system_prompt = system_prompt + "\n" + diary_context
-        except Exception:
-            pass  # memory enrichment is optional
+        except Exception as exc:
+            logger.warning("Memory enrichment failed (non-fatal): %s", exc, exc_info=True)
 
     # 2. Collect built-in tool functions
     builtin_tool_funcs: list[tuple[str, object]] = []

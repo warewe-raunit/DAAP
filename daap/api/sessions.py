@@ -61,6 +61,7 @@ class Session:
     # ask_user state — set by session-scoped closure, read by ws_handler
     pending_questions: list | None = None
     _resolve_answers: object | None = None      # callable injected by create_session_scoped_toolkit
+    _questions_event: object | None = None      # asyncio.Event: set when pending_questions is ready
 
     # File permission state — set by _file_permission_fn, resolved by ws_handler
     pending_permission: dict | None = None      # {"filepath": str, "operation": str}
@@ -380,7 +381,9 @@ def create_session_scoped_toolkit(
 
     # Per-session state captured by the closure
     _answer_event: asyncio.Event = asyncio.Event()
+    _questions_event: asyncio.Event = asyncio.Event()
     _state: dict = {"user_answers": None}
+    session._questions_event = _questions_event
 
     async def ask_user(questions_json: str) -> ToolResponse:
         """Ask the user clarifying questions before proceeding.
@@ -418,16 +421,33 @@ def create_session_scoped_toolkit(
                 text="questions_json must be a non-empty JSON array.",
             )])
 
-        # Store on session — WebSocket handler polls this
+        # Store on session and signal ws_handler (no polling needed)
         session.pending_questions = questions
         _answer_event.clear()
         _state["user_answers"] = None
+        _questions_event.set()
 
         # Pause until WebSocket handler calls _resolve_answers()
-        await _answer_event.wait()
+        # Timeout avoids hanging forever if the client disconnects mid-question.
+        _ASK_TIMEOUT = 300.0
+        try:
+            await asyncio.wait_for(_answer_event.wait(), timeout=_ASK_TIMEOUT)
+        except asyncio.TimeoutError:
+            session.pending_questions = None
+            _questions_event.clear()
+            logger.warning(
+                "ask_user: no answer received in %.0fs for session %s — client may have disconnected",
+                _ASK_TIMEOUT,
+                session.session_id,
+            )
+            return ToolResponse(content=[TextBlock(
+                type="text",
+                text="User did not respond in time. Proceed with what you know or ask again.",
+            )])
 
         # Clear pending state
         session.pending_questions = None
+        _questions_event.clear()
         answers = _state["user_answers"]
 
         if answers is None:
@@ -811,8 +831,8 @@ def create_session_scoped_toolkit(
                             model_used=getattr(nr, "model_id", "unknown"),
                             success=True,
                         )
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        logger.warning("Node memory write failed (non-fatal): %s", exc, exc_info=True)
                 if ws_send:
                     import asyncio
                     asyncio.get_running_loop().create_task(ws_send({

@@ -11,10 +11,13 @@ Node builder uses values to register tools with AgentScope.
 """
 
 import asyncio
+import logging
 import re
 from pathlib import Path
 
 import httpx
+
+logger = logging.getLogger(__name__)
 from bs4 import BeautifulSoup
 from agentscope.tool import ToolResponse
 from agentscope.message import TextBlock
@@ -249,7 +252,8 @@ def _get_mcp_manager_safe():
     try:
         from daap.mcpx.manager import get_mcp_manager
         return get_mcp_manager()
-    except Exception:
+    except Exception as exc:
+        logger.debug("MCP manager unavailable: %s", exc)
         return None
 
 
@@ -269,8 +273,8 @@ def get_tool_registry(
     if mcp_manager is not None:
         try:
             registry.update(mcp_manager.get_tool_registry_entries())
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("MCP tool registry entries unavailable (non-fatal): %s", exc, exc_info=True)
 
     if cwd is not None:
         _cwd = cwd.resolve()

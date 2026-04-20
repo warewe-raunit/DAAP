@@ -99,9 +99,9 @@ async def _run_agent_with_question_pump(
     """
     Send user_text to the master agent and handle ask_user pauses.
 
-    Runs the agent as a background task and polls session.pending_questions.
-    When the agent calls ask_user, questions appear on the session; we send
-    them to the client, wait for {"type":"answer"}, and resume the agent.
+    Runs the agent as a background task. When the agent calls ask_user it sets
+    session._questions_event; we wait on that event instead of polling, so
+    questions are dispatched immediately with no sleep overhead.
 
     Returns the agent's final response text.
     """
@@ -111,18 +111,26 @@ async def _run_agent_with_question_pump(
     try:
         while not agent_task.done():
             if session.pending_questions is not None:
-                # Agent is paused waiting for user input
+                # Agent is paused waiting for user input — send once, then loop
+                # until we receive a valid "answer" message (ignore anything else
+                # to prevent resending the same questions on unexpected messages).
                 await websocket.send_json({
                     "type": "questions",
                     "questions": session.pending_questions,
                 })
-
-                # Wait for client answer
-                raw = await websocket.receive_text()
-                data = json.loads(raw)
-                if data.get("type") == "answer":
-                    session._resolve_answers(data.get("answers", []))
-                # else: unexpected message type — ignore, agent stays paused
+                while session.pending_questions is not None:
+                    raw = await websocket.receive_text()
+                    data = json.loads(raw)
+                    if data.get("type") == "answer":
+                        session._resolve_answers(data.get("answers", []))
+                        # Agent will clear pending_questions after waking; give it
+                        # a tick to do so before the outer loop re-checks.
+                        await asyncio.sleep(0)
+                        break
+                    logger.debug(
+                        "Unexpected WS message while waiting for answer: %r",
+                        data.get("type"),
+                    )
 
             elif session.pending_permission is not None:
                 # Subagent wants to access a file outside cwd — ask user
@@ -132,7 +140,6 @@ async def _run_agent_with_question_pump(
                     "filepath": perm["filepath"],
                     "operation": perm["operation"],
                 })
-
                 raw = await websocket.receive_text()
                 data = json.loads(raw)
                 if data.get("type") == "permission_response":
@@ -141,7 +148,25 @@ async def _run_agent_with_question_pump(
                     # Unexpected message — deny by default
                     session._resolve_permission(False)
 
-            await asyncio.sleep(0.05)
+            else:
+                # Nothing pending — wait for agent to signal questions ready
+                # (or finish). Fall back to a short sleep if no event available.
+                questions_event = getattr(session, "_questions_event", None)
+                if questions_event is not None:
+                    waiter = asyncio.ensure_future(questions_event.wait())
+                    done, _ = await asyncio.wait(
+                        {agent_task, waiter},
+                        timeout=0.5,
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    if waiter not in done:
+                        waiter.cancel()
+                        try:
+                            await waiter
+                        except asyncio.CancelledError:
+                            pass
+                else:
+                    await asyncio.sleep(0.05)
     except Exception:
         agent_task.cancel()
         raise
