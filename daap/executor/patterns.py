@@ -12,6 +12,7 @@ This file is the lowest layer that knows about Msg objects.
 
 import asyncio
 from collections import Counter
+from xml.sax.saxutils import escape
 
 from agentscope.message import Msg
 
@@ -51,7 +52,7 @@ def _wrap_node_output(content: str, source_node_id: str, data_key: str) -> str:
     safe_data_key = data_key.replace('"', "").replace("<", "").replace(">", "")
     return (
         f'<node_output source="{safe_node_id}" data_key="{safe_data_key}">\n'
-        f"{content}\n"
+        f"{escape(content)}\n"
         f"</node_output>"
     )
 
