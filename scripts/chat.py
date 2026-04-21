@@ -58,7 +58,7 @@ from agentscope.message import Msg
 from daap.api.sessions import Session, SessionManager, create_session_scoped_toolkit
 from daap.identity import load_local_user, resolve_cli_user
 from daap.master.agent import create_master_agent_with_toolkit
-from daap.master.tools import clear_last_topology_result, get_last_topology_result
+from daap.master.tools import clear_last_topology_result
 from daap.topology.store import TopologyStore
 from daap.tools.token_tracker import TokenTracker
 
@@ -590,6 +590,12 @@ async def _run_agent_turn(session: Session) -> tuple[str, dict]:
     # Pump ask_user questions while agent runs
     while not agent_task.done():
         if session.pending_questions is not None:
+            # If agent just generated a topology in this same turn, show the
+            # plan spec BEFORE the approval question so user knows what they
+            # are approving. Clear the flag so the main loop doesn't re-print.
+            if session.topology_just_generated and session.pending_topology is not None:
+                session.topology_just_generated = False
+                _print_plan(session.pending_topology, session.pending_estimate, {})
             await _handle_ask_user(session)
         await asyncio.sleep(0.05)
 
@@ -922,6 +928,11 @@ async def _remote_main(args: argparse.Namespace) -> None:
         async with websockets.connect(ws_endpoint, ping_interval=30) as ws:
             _print_system("Connected. Type your message or /help.")
 
+            # Question handoff: recv_loop signals, main loop collects answers.
+            # Must be defined before _recv_loop so the closure captures them.
+            _qa_state: dict = {"pending": None, "answers": []}
+            _qa_answers_ready: asyncio.Event = asyncio.Event()
+
             async def _recv_loop():
                 """Background task: receive server events and render them."""
                 nonlocal raw_output, _last_result_received
@@ -946,14 +957,25 @@ async def _remote_main(args: argparse.Namespace) -> None:
                         _print_usage(usage)
 
                     elif etype == "plan":
-                        topo_stub = {"nodes": []}  # server holds the real topo
-                        est = {
-                            "total_cost_usd": event.get("cost_usd", 0),
-                            "total_latency_seconds": event.get("latency_seconds", 0),
-                        }
+                        topo = event.get("topology") or {}
+                        nodes = [
+                            n.get("node_id") for n in topo.get("nodes", [])
+                            if isinstance(n, dict)
+                        ]
+                        flow = " -> ".join(nodes) if nodes else event.get("summary", "(no nodes)")
+                        cost = event.get("cost_usd", 0)
+                        lat = event.get("latency_seconds", 0)
+                        min_cost = event.get("min_cost_usd", 0)
+                        usage = event.get("usage", {})
                         print(f"\n{YELLOW}{BOLD}plan{RESET}")
-                        _print_wrapped(f"Est cost : ${est['total_cost_usd']:.4f}", indent=2)
-                        _print_wrapped(f"Est time : {est['total_latency_seconds']:.0f}s", indent=2)
+                        _print_wrapped(f"Flow     : {flow}", indent=2)
+                        _print_wrapped(f"Est cost : ${cost:.4f}", indent=2)
+                        if min_cost and min_cost < cost:
+                            _print_wrapped(f"Min cost : ${min_cost:.4f}", indent=2)
+                        _print_wrapped(f"Est time : {lat:.0f}s", indent=2)
+                        if usage and usage.get("total_tokens"):
+                            models = ", ".join(usage.get("models_used", []))
+                            _print_wrapped(f"Planning : {usage.get('total_tokens', 0)} tokens ({models})", indent=2)
                         print(f"\n{YELLOW}Next: /approve | /cheaper | /cancel{RESET}\n")
                         pending_plan = event
 
@@ -988,28 +1010,17 @@ async def _remote_main(args: argparse.Namespace) -> None:
                         _print_system("Rate this run: /rate <1-5> [comment]  or just say how it went")
 
                     elif etype == "questions":
-                        questions = event.get("questions", [])
-                        print(f"\n{YELLOW}{BOLD}DAAP needs more info:{RESET}")
-                        answers = []
-                        for i, q in enumerate(questions, 1):
-                            print(f"\n  {BOLD}Q{i}:{RESET} {q.get('question', '')}")
-                            options = q.get("options", [])
-                            if options:
-                                for j, opt in enumerate(options):
-                                    label = opt.get("label", "")
-                                    desc = opt.get("description", "")
-                                    print(f"    {j+1}. {label}" + (f" — {desc}" if desc else ""))
-                                print(f"    {DIM}Enter number or type your answer:{RESET} ", end="", flush=True)
-                            else:
-                                print(f"    {DIM}Your answer:{RESET} ", end="", flush=True)
-                            raw_ans = await asyncio.get_running_loop().run_in_executor(None, input, "")
-                            raw_ans = raw_ans.strip()
-                            if options and raw_ans.isdigit():
-                                idx = int(raw_ans) - 1
-                                if 0 <= idx < len(options):
-                                    raw_ans = options[idx]["label"]
-                            answers.append(raw_ans)
-                        await ws.send(json.dumps({"type": "answer", "answers": answers}))
+                        # Hand off to main loop — never call input() from recv_loop
+                        # (two coroutines owning stdin simultaneously garbles the terminal).
+                        _qa_state["pending"] = event.get("questions", [])
+                        _qa_answers_ready.clear()
+                        try:
+                            _prompt_session.app.exit(result="")
+                        except Exception:
+                            pass
+                        await _qa_answers_ready.wait()
+                        await ws.send(json.dumps({"type": "answer", "answers": _qa_state["answers"]}))
+                        _qa_state["pending"] = None
 
                     elif etype == "error":
                         _print_error(f"Server error: {event.get('message', '')}")
@@ -1018,6 +1029,32 @@ async def _remote_main(args: argparse.Namespace) -> None:
 
             try:
                 while True:
+                    # Handle questions that arrived before or while prompting.
+                    if _qa_state["pending"] is not None:
+                        questions = _qa_state["pending"]
+                        print(f"\n{YELLOW}{BOLD}DAAP needs more info:{RESET}")
+                        answers: list[str] = []
+                        for i, q in enumerate(questions, 1):
+                            print(f"\n  {BOLD}Q{i}:{RESET} {q.get('question', '')}")
+                            opts = q.get("options", [])
+                            if opts:
+                                for j, opt in enumerate(opts):
+                                    label = opt.get("label", "")
+                                    desc  = opt.get("description", "")
+                                    print(f"    {j+1}. {label}" + (f" — {desc}" if desc else ""))
+                                print(f"    {DIM}Enter number or type your answer:{RESET} ", end="", flush=True)
+                            else:
+                                print(f"    {DIM}Your answer:{RESET} ", end="", flush=True)
+                            raw_ans = (await asyncio.get_running_loop().run_in_executor(None, input, "")).strip()
+                            if opts and raw_ans.isdigit():
+                                idx = int(raw_ans) - 1
+                                if 0 <= idx < len(opts):
+                                    raw_ans = opts[idx]["label"]
+                            answers.append(raw_ans)
+                        _qa_state["answers"] = answers
+                        _qa_answers_ready.set()
+                        continue
+
                     try:
                         with patch_stdout():
                             user_input = await _prompt_session.prompt_async("You: ")
@@ -1025,6 +1062,10 @@ async def _remote_main(args: argparse.Namespace) -> None:
                     except (EOFError, KeyboardInterrupt):
                         print("\nBye!")
                         break
+
+                    # Prompt was interrupted to deliver questions — loop back.
+                    if _qa_state["pending"] is not None:
+                        continue
 
                     if not user_input:
                         continue
@@ -1630,15 +1671,19 @@ async def main(args: argparse.Namespace | None = None):
 
             session.conversation.append({"role": "assistant", "content": response_text})
 
-            # Check if topology was generated this turn
-            topo_result = get_last_topology_result()
-            if topo_result.get("topology") is not None:
-                session.pending_topology = topo_result["topology"]
-                session.pending_estimate = topo_result["estimate"]
-                clear_last_topology_result()
+            # Check if topology was generated this turn.
+            # session-scoped toolkit stores result on session and clears the
+            # ContextVar itself, so we must check session.topology_just_generated
+            # (not get_last_topology_result() which is always None here).
+            # If the agent also called ask_user + execute in the same turn,
+            # topology_just_generated was already cleared inside _run_agent_turn
+            # and pending_topology may be None — skip the plan display.
+            if session.topology_just_generated and session.pending_topology is not None:
+                session.topology_just_generated = False
                 _print_agent(response_text, raw_output=raw_output)
                 _print_plan(session.pending_topology, session.pending_estimate, usage)
             else:
+                session.topology_just_generated = False
                 _print_agent(response_text, raw_output=raw_output)
                 _print_usage(usage)
     finally:

@@ -9,8 +9,11 @@ Tables:
 import json
 import sqlite3
 from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
 import numpy as np
 from pathlib import Path
+
+from daap.retention import get_data_dir, get_retention_days
 
 
 class BanditStore:
@@ -25,9 +28,11 @@ class BanditStore:
     Also logs every observation for debugging.
     """
 
-    def __init__(self, db_path: str = "daap_optimizer.db"):
-        self.db_path = str(Path(db_path))
-        Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
+    def __init__(self, db_path: str | None = None, retention_days: int | None = None):
+        resolved = Path(db_path) if db_path else get_data_dir() / "daap_optimizer.db"
+        self.db_path = str(resolved)
+        self.retention_days = retention_days or get_retention_days()
+        resolved.parent.mkdir(parents=True, exist_ok=True)
         self._init_db()
 
     @contextmanager
@@ -215,3 +220,14 @@ class BanditStore:
                 seen.add(role)
                 result.append({"role": role, "best_arm": arm, "n_pulls": n_pulls})
         return result
+
+    def purge_expired(self, retention_days: int | None = None) -> int:
+        """Delete old observation rows based on configured retention."""
+        days = retention_days or self.retention_days
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
+        with self._connect() as conn:
+            cur = conn.execute(
+                "DELETE FROM bandit_observations WHERE created_at < ?",
+                (cutoff,),
+            )
+        return cur.rowcount

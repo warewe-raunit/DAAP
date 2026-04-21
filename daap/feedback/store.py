@@ -10,6 +10,8 @@ import sqlite3
 import time
 from pathlib import Path
 
+from daap.retention import get_data_dir, get_retention_days
+
 
 class FeedbackStore:
     """
@@ -19,8 +21,11 @@ class FeedbackStore:
     Phase 3: migrate to Postgres if multi-node deployment is needed.
     """
 
-    def __init__(self, db_path: str = "daap_feedback.db"):
-        self.db_path = db_path
+    def __init__(self, db_path: str | None = None, retention_days: int | None = None):
+        resolved = Path(db_path) if db_path else get_data_dir() / "daap_feedback.db"
+        self.db_path = str(resolved)
+        self.retention_days = retention_days or get_retention_days()
+        resolved.parent.mkdir(parents=True, exist_ok=True)
         self._init_db()
 
     def _init_db(self) -> None:
@@ -40,6 +45,12 @@ class FeedbackStore:
                     comment               TEXT
                 )
             """)
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_runs_timestamp
+                ON runs(timestamp)
+                """
+            )
             conn.commit()
 
     # ------------------------------------------------------------------
@@ -136,3 +147,12 @@ class FeedbackStore:
                 "SELECT * FROM runs WHERE rating IS NOT NULL ORDER BY timestamp DESC"
             )
             return [dict(row) for row in cursor.fetchall()]
+
+    def purge_expired(self, retention_days: int | None = None) -> int:
+        """Delete run rows older than the configured retention window."""
+        days = retention_days or self.retention_days
+        cutoff = time.time() - days * 86400
+        with sqlite3.connect(self.db_path) as conn:
+            cur = conn.execute("DELETE FROM runs WHERE timestamp < ?", (cutoff,))
+            conn.commit()
+            return cur.rowcount

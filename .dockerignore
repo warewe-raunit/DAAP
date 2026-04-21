@@ -1,0 +1,17 @@
+.env
+.env.*
+*.db
+__pycache__
+*.pyc
+*.pyo
+.pytest_cache
+.git
+.gitignore
+graphify-out/
+.venv
+venv
+*.egg-info
+dist
+build
+CLAUDE.md
+daap/tests/

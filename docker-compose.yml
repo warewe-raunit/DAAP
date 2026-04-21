@@ -8,21 +8,36 @@ services:
       - qdrant_data:/qdrant/storage
     ports:
       - "6333:6333"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:6333/healthz || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
 
   daap:
     build: .
     restart: unless-stopped
     depends_on:
-      - qdrant
+      qdrant:
+        condition: service_healthy
     env_file:
       - .env
     environment:
       QDRANT_HOST: qdrant
       QDRANT_PORT: "6333"
+      PYTHONIOENCODING: "utf-8"
+      DAAP_DATA_DIR: /root/.daap
     ports:
       - "8000:8000"
     volumes:
       - daap_data:/root/.daap
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
 
 volumes:
   qdrant_data:

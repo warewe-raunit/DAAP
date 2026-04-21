@@ -22,6 +22,8 @@ from daap.master.tools import (
     generate_topology as generate_topology_tool,
     register_skill as register_skill_tool,
 )
+from daap.master.runtime import build_master_runtime_snapshot
+from daap.retention import get_data_dir, get_session_ttl_hours
 from daap.skills.manager import apply_configured_skills
 
 logger = logging.getLogger(__name__)
@@ -76,7 +78,11 @@ class Session:
 # Session persistence (SQLite)
 # ---------------------------------------------------------------------------
 
-_SESSION_TTL_HOURS = 24
+_DEFAULT_SESSION_TTL_HOURS = get_session_ttl_hours()
+_SESSION_COMPACTION_TRIGGER_MESSAGES = 160
+_SESSION_COMPACTION_KEEP_RECENT_MESSAGES = 100
+_SESSION_COMPACTION_MAX_BULLETS = 8
+_SESSION_SUMMARY_PREFIX = "[DAAP conversation summary]"
 
 # Fields serialised to DB. Excludes live objects (agent, callables, asyncio state).
 _PERSIST_FIELDS = (
@@ -97,11 +103,11 @@ class SessionStore:
     recreated on reconnect.
     """
 
-    def __init__(self, db_path: str = "daap_sessions.db"):
-        self.db_path = str(db_path)
-        db_parent = Path(db_path).parent
-        if str(db_parent) not in ("", "."):
-            db_parent.mkdir(parents=True, exist_ok=True)
+    def __init__(self, db_path: str | None = None):
+        resolved = Path(db_path) if db_path else get_data_dir() / "daap_sessions.db"
+        self.db_path = str(resolved)
+        self.ttl_hours = _DEFAULT_SESSION_TTL_HOURS
+        resolved.parent.mkdir(parents=True, exist_ok=True)
         self._init_db()
 
     def _init_db(self) -> None:
@@ -131,6 +137,15 @@ class SessionStore:
     def save(self, session: "Session") -> None:
         """Upsert serialisable session fields."""
         now = time.time()
+        compacted_conversation = _compact_conversation_for_storage(session.conversation)
+        if len(compacted_conversation) < len(session.conversation):
+            logger.info(
+                "SessionStore: compacted conversation for %s from %d to %d messages",
+                session.session_id,
+                len(session.conversation),
+                len(compacted_conversation),
+            )
+            session.conversation = compacted_conversation
         with sqlite3.connect(self.db_path) as conn:
             conn.execute("""
                 INSERT INTO sessions
@@ -153,7 +168,7 @@ class SessionStore:
                 session.user_id,
                 session.created_at,
                 now,
-                json.dumps(session.conversation),
+                json.dumps(compacted_conversation),
                 json.dumps(session.pending_topology) if session.pending_topology else None,
                 json.dumps(session.pending_estimate) if session.pending_estimate else None,
                 json.dumps(session.master_operator_config) if session.master_operator_config else None,
@@ -172,9 +187,10 @@ class SessionStore:
             )
             conn.commit()
 
-    def load_one(self, session_id: str, ttl_hours: int = _SESSION_TTL_HOURS) -> dict | None:
+    def load_one(self, session_id: str, ttl_hours: int | None = None) -> dict | None:
         """Return a single session row if it exists and is within TTL, else None."""
-        cutoff = time.time() - ttl_hours * 3600
+        ttl = self.ttl_hours if ttl_hours is None else ttl_hours
+        cutoff = time.time() - ttl * 3600
         with sqlite3.connect(self.db_path) as conn:
             conn.row_factory = sqlite3.Row
             row = conn.execute(
@@ -183,9 +199,10 @@ class SessionStore:
             ).fetchone()
         return dict(row) if row else None
 
-    def load_active(self, ttl_hours: int = _SESSION_TTL_HOURS) -> list[dict]:
+    def load_active(self, ttl_hours: int | None = None) -> list[dict]:
         """Return all sessions updated within the TTL window."""
-        cutoff = time.time() - ttl_hours * 3600
+        ttl = self.ttl_hours if ttl_hours is None else ttl_hours
+        cutoff = time.time() - ttl * 3600
         with sqlite3.connect(self.db_path) as conn:
             conn.row_factory = sqlite3.Row
             rows = conn.execute(
@@ -198,15 +215,101 @@ class SessionStore:
             conn.execute("DELETE FROM sessions WHERE session_id = ?", (session_id,))
             conn.commit()
 
-    def purge_expired(self, ttl_hours: int = _SESSION_TTL_HOURS) -> int:
+    def purge_expired(self, ttl_hours: int | None = None) -> int:
         """Hard-delete sessions older than ttl_hours. Returns count deleted."""
-        cutoff = time.time() - ttl_hours * 3600
+        ttl = self.ttl_hours if ttl_hours is None else ttl_hours
+        cutoff = time.time() - ttl * 3600
         with sqlite3.connect(self.db_path) as conn:
             cur = conn.execute(
                 "DELETE FROM sessions WHERE updated_at < ?", (cutoff,)
             )
             conn.commit()
             return cur.rowcount
+
+
+def _is_compaction_summary(message: dict) -> bool:
+    metadata = message.get("metadata", {}) if isinstance(message, dict) else {}
+    if not isinstance(metadata, dict):
+        return False
+    return bool(metadata.get("daap_compacted"))
+
+
+def _extract_message_text(message: dict) -> str:
+    if not isinstance(message, dict):
+        return ""
+    content = message.get("content", "")
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        parts: list[str] = []
+        for block in content:
+            if isinstance(block, str):
+                parts.append(block.strip())
+            elif isinstance(block, dict) and isinstance(block.get("text"), str):
+                parts.append(block["text"].strip())
+        return " ".join(p for p in parts if p).strip()
+    return ""
+
+
+def _build_compaction_summary(messages: list[dict]) -> dict:
+    user_samples: list[str] = []
+    assistant_samples: list[str] = []
+    prior_compacted = 0
+    for msg in messages:
+        if _is_compaction_summary(msg):
+            metadata = msg.get("metadata", {}) if isinstance(msg, dict) else {}
+            if isinstance(metadata, dict):
+                prior_compacted += int(metadata.get("compacted_count", 0) or 0)
+            continue
+
+        role = str(msg.get("role", "unknown")) if isinstance(msg, dict) else "unknown"
+        text = _extract_message_text(msg)
+        if not text:
+            continue
+        clipped = text.replace("\n", " ")[:180]
+        if role == "user" and len(user_samples) < _SESSION_COMPACTION_MAX_BULLETS:
+            user_samples.append(clipped)
+        elif role == "assistant" and len(assistant_samples) < _SESSION_COMPACTION_MAX_BULLETS:
+            assistant_samples.append(clipped)
+
+    compacted_count = len(messages) + prior_compacted
+    lines = [
+        _SESSION_SUMMARY_PREFIX,
+        f"Compacted {compacted_count} historical messages.",
+    ]
+    if user_samples:
+        lines.append("Recent user intents (compressed):")
+        lines.extend(f"- {entry}" for entry in user_samples)
+    if assistant_samples:
+        lines.append("Recent assistant outputs (compressed):")
+        lines.extend(f"- {entry}" for entry in assistant_samples)
+
+    return {
+        "role": "assistant",
+        "content": "\n".join(lines),
+        "metadata": {
+            "daap_compacted": True,
+            "compacted_count": compacted_count,
+            "strategy": "deterministic-summary-v1",
+        },
+    }
+
+
+def _compact_conversation_for_storage(conversation: list[dict]) -> list[dict]:
+    """
+    Deterministically compact long conversation history for persistence.
+
+    Keeps the most recent window verbatim and replaces older history with a
+    structured summary message so restart/recovery retains intent continuity.
+    """
+    if len(conversation) <= _SESSION_COMPACTION_TRIGGER_MESSAGES:
+        return conversation
+
+    recent = conversation[-_SESSION_COMPACTION_KEEP_RECENT_MESSAGES:]
+    older = conversation[:-_SESSION_COMPACTION_KEEP_RECENT_MESSAGES]
+    summary = _build_compaction_summary(older)
+    recent_without_summary = [m for m in recent if not _is_compaction_summary(m)]
+    return [summary, *recent_without_summary]
 
 
 def _merge_from_row(session: "Session", row: dict) -> None:
@@ -555,6 +658,30 @@ def create_session_scoped_toolkit(
     toolkit.register_tool_function(ask_user)
     toolkit.register_tool_function(register_skill_tool)
 
+    async def get_runtime_context() -> ToolResponse:
+        """Return current runtime capabilities and infrastructure for this session."""
+        snapshot = build_master_runtime_snapshot(
+            toolkit,
+            execution_mode="api-session",
+            memory_enabled=bool(daap_memory),
+            optimizer_enabled=bool(rl_optimizer),
+            topology_store_enabled=topology_store is not None,
+            feedback_store_enabled=True,
+            session_store_enabled=session_store is not None,
+            extra={
+                "session": {
+                    "has_pending_topology": session.pending_topology is not None,
+                    "is_executing": bool(session.is_executing),
+                }
+            },
+        )
+        return ToolResponse(content=[TextBlock(
+            type="text",
+            text=json.dumps(snapshot, indent=2),
+        )])
+
+    toolkit.register_tool_function(get_runtime_context)
+
     async def get_execution_status() -> ToolResponse:
         """Check the status of the current or most recent topology execution.
 
@@ -590,7 +717,7 @@ def create_session_scoped_toolkit(
                 nodes = [n.get("node_id") for n in pending.get("nodes", [])]
                 return ToolResponse(content=[TextBlock(
                     type="text",
-                    text=f"No execution yet. A topology is pending approval: nodes={nodes}. User must type 'approve' to execute.",
+                    text=f"No execution yet. A topology is pending approval: nodes={nodes}. Ask the user if they want to proceed, then call execute_pending_topology.",
                 )])
             return ToolResponse(content=[TextBlock(
                 type="text",

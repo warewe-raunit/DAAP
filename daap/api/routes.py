@@ -32,16 +32,19 @@ from daap.api.topology_routes import (
 from daap.api.ws_handler import handle_websocket
 from daap.feedback.store import FeedbackStore
 from daap.master.agent import create_master_agent_with_toolkit
+from daap.master.runtime import build_master_runtime_snapshot
+from daap.optimizer.store import BanditStore
 from daap.topology.store import TopologyStore
 from daap.tools.token_tracker import TokenTracker
 
 logger = logging.getLogger(__name__)
 
 # Global singletons
-_session_store = SessionStore("daap_sessions.db")
+_session_store = SessionStore()
 session_manager = SessionManager(store=_session_store)
 feedback_store = FeedbackStore()
 topology_store = TopologyStore()
+bandit_store = BanditStore()
 
 set_topology_store(topology_store)
 set_topology_session_manager(session_manager)
@@ -59,11 +62,24 @@ _rl_optimizer = None
 async def lifespan(app: FastAPI):
     mcp_manager = None
 
-    # Startup: purge expired topologies
+    # Startup: purge expired data by shared retention policy
     try:
-        purged = topology_store.purge_expired()
-        if purged:
-            logger.info("Startup: purged %d expired topologies", purged)
+        purged_sessions = _session_store.purge_expired()
+        purged_feedback = feedback_store.purge_expired()
+        purged_topologies = topology_store.purge_expired()
+        purged_runs = topology_store.purge_old_runs()
+        purged_optimizer = bandit_store.purge_expired()
+        logger.info(
+            (
+                "Startup purge complete: sessions=%d feedback=%d topologies=%d "
+                "topology_runs=%d optimizer_observations=%d"
+            ),
+            purged_sessions,
+            purged_feedback,
+            purged_topologies,
+            purged_runs,
+            purged_optimizer,
+        )
     except Exception as exc:
         logger.warning("Startup purge failed (non-fatal): %s", exc)
 
@@ -184,6 +200,19 @@ def _build_subagent_operator_config(
     }
 
 
+def _build_master_runtime_context(toolkit, memory, optimizer) -> dict:
+    """Build runtime infra snapshot passed into the master system prompt."""
+    return build_master_runtime_snapshot(
+        toolkit,
+        execution_mode="api-session",
+        memory_enabled=bool(memory),
+        optimizer_enabled=bool(optimizer),
+        topology_store_enabled=True,
+        feedback_store_enabled=True,
+        session_store_enabled=True,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Health + model listing
 # ---------------------------------------------------------------------------
@@ -273,6 +302,7 @@ async def create_session(
         user_context=user_context,
         operator_config=session.master_operator_config,
         tracker=session.token_tracker,
+        runtime_context=_build_master_runtime_context(toolkit, memory, optimizer),
     )
     # Persist operator config so the agent can be recreated on reconnect
     session_manager.persist(session.session_id)
@@ -482,6 +512,15 @@ async def get_memory_history(user_id: str, q: str = ""):
         raise HTTPException(status_code=500, detail=str(exc))
 
 
+@app.get("/api/v1/memory/status", dependencies=[Depends(require_api_key)])
+async def get_memory_status():
+    """Return current memory availability/degraded status with error counters."""
+    _get_memory()  # triggers lazy init and status updates
+    from daap.memory.observability import get_memory_status as _get_memory_status
+
+    return _get_memory_status()
+
+
 
 @app.delete("/api/v1/memory/{user_id}", dependencies=[Depends(require_api_key)])
 async def delete_user_memory(user_id: str):
@@ -546,6 +585,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str, token: str |
                 user_context=user_context,
                 operator_config=session.master_operator_config,
                 tracker=session.token_tracker,
+                runtime_context=_build_master_runtime_context(toolkit, memory, optimizer),
             )
             logger.info("Recreated master_agent for restored session %s", session_id)
         except Exception as exc:

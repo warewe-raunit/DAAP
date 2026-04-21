@@ -14,6 +14,7 @@ import time
 import uuid
 from pathlib import Path
 
+from daap.retention import get_data_dir, get_retention_days
 from daap.topology.models import StoredTopology, TopologyRun
 from daap.topology.naming import auto_name_from_prompt
 
@@ -23,11 +24,11 @@ logger = logging.getLogger(__name__)
 class TopologyStore:
     """SQLite store for saved topologies and their run history."""
 
-    def __init__(self, db_path: str = "daap_topology.db"):
-        self.db_path = db_path
-        db_parent = Path(db_path).parent
-        if str(db_parent) not in ("", "."):
-            db_parent.mkdir(parents=True, exist_ok=True)
+    def __init__(self, db_path: str | None = None, retention_days: int | None = None):
+        resolved = Path(db_path) if db_path else get_data_dir() / "daap_topology.db"
+        self.db_path = str(resolved)
+        self.retention_days = retention_days or get_retention_days()
+        resolved.parent.mkdir(parents=True, exist_ok=True)
         self._init_db()
 
     # ------------------------------------------------------------------
@@ -160,7 +161,7 @@ class TopologyStore:
 
             created_at = now
             max_runs = 10
-            delete_ttl_days = 30
+            delete_ttl_days = self.retention_days
 
             if latest_version is not None:
                 latest_row = conn.execute(
@@ -309,8 +310,9 @@ class TopologyStore:
     # Soft delete / restore / purge
     # ------------------------------------------------------------------
 
-    def delete_topology(self, topology_id: str, ttl_days: int = 30) -> None:
+    def delete_topology(self, topology_id: str, ttl_days: int | None = None) -> None:
         """Soft-delete all versions of a topology."""
+        effective_ttl = ttl_days if ttl_days is not None else self.retention_days
         with sqlite3.connect(self.db_path) as conn:
             conn.execute(
                 """
@@ -318,7 +320,7 @@ class TopologyStore:
                 SET deleted_at = ?, delete_ttl_days = ?
                 WHERE topology_id = ?
                 """,
-                (time.time(), ttl_days, topology_id),
+                (time.time(), effective_ttl, topology_id),
             )
             conn.commit()
 
@@ -368,6 +370,15 @@ class TopologyStore:
             deleted_count = result.rowcount
             logger.info("Purged %d expired topology rows", deleted_count)
             return deleted_count
+
+    def purge_old_runs(self, retention_days: int | None = None) -> int:
+        """Hard-delete run rows older than retention_days."""
+        days = retention_days or self.retention_days
+        cutoff = time.time() - days * 86400
+        with sqlite3.connect(self.db_path) as conn:
+            cur = conn.execute("DELETE FROM topology_runs WHERE ran_at < ?", (cutoff,))
+            conn.commit()
+            return cur.rowcount
 
     # ------------------------------------------------------------------
     # Read — topology
