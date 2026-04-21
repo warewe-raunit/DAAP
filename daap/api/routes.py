@@ -44,212 +44,74 @@ logger = logging.getLogger(__name__)
 # Chat UI — single-file HTML served at GET /
 # ---------------------------------------------------------------------------
 
-_CHAT_HTML = """<!DOCTYPE html>
+_CHAT_HTML = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>DAAP Chat</title>
 <style>
-  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-  body {
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-    background: #0f1117;
-    color: #e2e8f0;
-    height: 100dvh;
-    display: flex;
-    flex-direction: column;
-  }
-  header {
-    padding: 12px 20px;
-    border-bottom: 1px solid #1e2430;
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    background: #141921;
-  }
-  header h1 { font-size: 1rem; font-weight: 600; color: #94a3b8; letter-spacing: 0.05em; }
-  #status-dot {
-    width: 8px; height: 8px; border-radius: 50%;
-    background: #ef4444; flex-shrink: 0;
-    transition: background 0.3s;
-  }
-  #status-dot.connected { background: #22c55e; }
-  #messages {
-    flex: 1;
-    overflow-y: auto;
-    padding: 20px;
-    display: flex;
-    flex-direction: column;
-    gap: 14px;
-  }
-  .msg {
-    max-width: 720px;
-    padding: 12px 16px;
-    border-radius: 12px;
-    line-height: 1.55;
-    font-size: 0.9rem;
-    white-space: pre-wrap;
-    word-break: break-word;
-  }
-  .msg.user { background: #1e40af; align-self: flex-end; color: #e0e7ff; border-bottom-right-radius: 3px; }
-  .msg.agent { background: #1e2430; align-self: flex-start; border-bottom-left-radius: 3px; }
-  .msg.error { background: #450a0a; color: #fca5a5; align-self: flex-start; border-left: 3px solid #ef4444; }
-  .msg.system { background: transparent; color: #64748b; align-self: center; font-size: 0.8rem; font-style: italic; }
-
-  /* Plan card */
-  .plan-card {
-    background: #1a2235;
-    border: 1px solid #2d3f5e;
-    border-radius: 12px;
-    padding: 16px;
-    align-self: flex-start;
-    max-width: 560px;
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
-  }
-  .plan-card h3 { font-size: 0.85rem; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.08em; }
-  .plan-card .summary { font-size: 0.9rem; color: #e2e8f0; }
-  .plan-meta { display: flex; gap: 16px; font-size: 0.8rem; color: #64748b; }
-  .plan-actions { display: flex; gap: 8px; }
-  .btn {
-    padding: 7px 16px; border: none; border-radius: 7px;
-    font-size: 0.85rem; font-weight: 500; cursor: pointer;
-    transition: opacity 0.15s;
-  }
-  .btn:hover { opacity: 0.85; }
-  .btn:disabled { opacity: 0.4; cursor: not-allowed; }
-  .btn-approve { background: #16a34a; color: #fff; }
-  .btn-cheaper { background: #1d4ed8; color: #fff; }
-  .btn-cancel  { background: #374151; color: #d1d5db; }
-
-  /* Questions form */
-  .questions-card {
-    background: #1a2235;
-    border: 1px solid #2d3f5e;
-    border-radius: 12px;
-    padding: 16px;
-    align-self: flex-start;
-    max-width: 560px;
-    display: flex;
-    flex-direction: column;
-    gap: 12px;
-  }
-  .questions-card h3 { font-size: 0.85rem; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.08em; }
-  .q-item { display: flex; flex-direction: column; gap: 5px; }
-  .q-item label { font-size: 0.85rem; color: #cbd5e1; }
-  .q-item input, .q-item select {
-    background: #0f1117; border: 1px solid #374151; border-radius: 6px;
-    color: #e2e8f0; padding: 7px 10px; font-size: 0.875rem;
-    outline: none;
-  }
-  .q-item input:focus, .q-item select:focus { border-color: #3b82f6; }
-
-  /* Executing indicator */
-  .executing-row {
-    display: flex; align-items: center; gap: 10px;
-    align-self: flex-start; color: #94a3b8; font-size: 0.85rem;
-  }
-  .spinner {
-    width: 16px; height: 16px;
-    border: 2px solid #374151;
-    border-top-color: #3b82f6;
-    border-radius: 50%;
-    animation: spin 0.8s linear infinite;
-    flex-shrink: 0;
-  }
-  @keyframes spin { to { transform: rotate(360deg); } }
-
-  /* Result card */
-  .result-card {
-    background: #052e16;
-    border: 1px solid #166534;
-    border-radius: 12px;
-    padding: 16px;
-    align-self: flex-start;
-    max-width: 720px;
-  }
-  .result-card h3 { font-size: 0.85rem; color: #4ade80; margin-bottom: 8px; text-transform: uppercase; letter-spacing: 0.08em; }
-  .result-card pre {
-    font-family: "SF Mono", "Fira Code", monospace;
-    font-size: 0.82rem;
-    white-space: pre-wrap;
-    word-break: break-word;
-    color: #bbf7d0;
-  }
-  .result-meta { font-size: 0.78rem; color: #4ade80; margin-top: 8px; opacity: 0.7; }
-
-  /* Bottom bar */
-  #bottom {
-    padding: 14px 20px;
-    border-top: 1px solid #1e2430;
-    background: #141921;
-    display: flex;
-    gap: 10px;
-  }
-  #input {
-    flex: 1;
-    background: #1e2430;
-    border: 1px solid #374151;
-    border-radius: 10px;
-    color: #e2e8f0;
-    padding: 10px 14px;
-    font-size: 0.9rem;
-    resize: none;
-    outline: none;
-    max-height: 160px;
-    line-height: 1.4;
-  }
-  #input:focus { border-color: #3b82f6; }
-  #send-btn {
-    padding: 10px 18px;
-    background: #3b82f6;
-    color: #fff;
-    border: none;
-    border-radius: 10px;
-    font-size: 0.9rem;
-    font-weight: 500;
-    cursor: pointer;
-    align-self: flex-end;
-    transition: background 0.15s;
-  }
-  #send-btn:hover { background: #2563eb; }
-  #send-btn:disabled { background: #374151; cursor: not-allowed; }
-
-  /* Setup overlay */
-  #setup-overlay {
-    position: fixed; inset: 0;
-    background: rgba(0,0,0,0.7);
-    display: flex; align-items: center; justify-content: center;
-    z-index: 100;
-  }
-  #setup-box {
-    background: #141921;
-    border: 1px solid #2d3f5e;
-    border-radius: 16px;
-    padding: 32px;
-    width: 360px;
-    display: flex;
-    flex-direction: column;
-    gap: 18px;
-  }
-  #setup-box h2 { font-size: 1.1rem; color: #e2e8f0; }
-  #setup-box p { font-size: 0.85rem; color: #64748b; }
-  .field { display: flex; flex-direction: column; gap: 6px; }
-  .field label { font-size: 0.85rem; color: #94a3b8; }
-  .field input {
-    background: #0f1117; border: 1px solid #374151; border-radius: 8px;
-    color: #e2e8f0; padding: 9px 12px; font-size: 0.9rem; outline: none;
-  }
-  .field input:focus { border-color: #3b82f6; }
-  #start-btn {
-    padding: 10px; background: #3b82f6; color: #fff;
-    border: none; border-radius: 8px; font-size: 0.95rem;
-    font-weight: 600; cursor: pointer;
-  }
-  #start-btn:hover { background: #2563eb; }
-  #setup-error { color: #fca5a5; font-size: 0.82rem; display: none; }
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#0f1117;color:#e2e8f0;height:100dvh;display:flex;flex-direction:column}
+header{padding:10px 18px;border-bottom:1px solid #1e2430;display:flex;align-items:center;gap:10px;background:#141921;min-height:44px}
+header h1{font-size:.95rem;font-weight:600;color:#94a3b8;letter-spacing:.05em}
+#status-dot{width:8px;height:8px;border-radius:50%;background:#ef4444;flex-shrink:0;transition:background .3s}
+#status-dot.connected{background:#22c55e}
+#header-right{margin-left:auto;display:flex;align-items:center;gap:12px}
+#session-label{font-size:.72rem;color:#475569}
+#raw-badge{font-size:.7rem;padding:2px 7px;border-radius:4px;background:#1d4ed8;color:#bfdbfe;display:none}
+#messages{flex:1;overflow-y:auto;padding:18px;display:flex;flex-direction:column;gap:12px}
+.msg{max-width:740px;padding:11px 15px;border-radius:12px;line-height:1.55;font-size:.875rem;white-space:pre-wrap;word-break:break-word}
+.msg.user{background:#1e40af;align-self:flex-end;color:#e0e7ff;border-bottom-right-radius:3px}
+.msg.agent{background:#1e2430;align-self:flex-start;border-bottom-left-radius:3px}
+.msg.error{background:#450a0a;color:#fca5a5;align-self:flex-start;border-left:3px solid #ef4444}
+.msg.system{background:transparent;color:#64748b;align-self:center;font-size:.78rem;font-style:italic;max-width:90%;text-align:center}
+.usage-line{font-size:.72rem;color:#475569;margin-top:5px}
+.plan-card{background:#1a2235;border:1px solid #2d3f5e;border-radius:12px;padding:15px;align-self:flex-start;max-width:560px;display:flex;flex-direction:column;gap:10px}
+.plan-card h3{font-size:.78rem;color:#94a3b8;text-transform:uppercase;letter-spacing:.08em}
+.plan-card .summary{font-size:.875rem;color:#e2e8f0}
+.plan-meta{display:flex;gap:16px;font-size:.78rem;color:#64748b}
+.plan-actions{display:flex;gap:8px;flex-wrap:wrap}
+.btn{padding:6px 14px;border:none;border-radius:7px;font-size:.82rem;font-weight:500;cursor:pointer;transition:opacity .15s}
+.btn:hover{opacity:.85}.btn:disabled{opacity:.4;cursor:not-allowed}
+.btn-approve{background:#16a34a;color:#fff}.btn-cheaper{background:#1d4ed8;color:#fff}.btn-cancel{background:#374151;color:#d1d5db}
+.questions-card{background:#1a2235;border:1px solid #2d3f5e;border-radius:12px;padding:15px;align-self:flex-start;max-width:560px;display:flex;flex-direction:column;gap:11px}
+.questions-card h3{font-size:.78rem;color:#94a3b8;text-transform:uppercase;letter-spacing:.08em}
+.q-item{display:flex;flex-direction:column;gap:4px}
+.q-item label{font-size:.82rem;color:#cbd5e1}
+.q-item input,.q-item select{background:#0f1117;border:1px solid #374151;border-radius:6px;color:#e2e8f0;padding:6px 10px;font-size:.85rem;outline:none}
+.q-item input:focus,.q-item select:focus{border-color:#3b82f6}
+.executing-row{display:flex;align-items:center;gap:10px;align-self:flex-start;color:#94a3b8;font-size:.82rem}
+.spinner{width:15px;height:15px;border:2px solid #374151;border-top-color:#3b82f6;border-radius:50%;animation:spin .8s linear infinite;flex-shrink:0}
+@keyframes spin{to{transform:rotate(360deg)}}
+.result-card{background:#052e16;border:1px solid #166534;border-radius:12px;padding:15px;align-self:flex-start;max-width:740px}
+.result-card h3{font-size:.78rem;color:#4ade80;margin-bottom:8px;text-transform:uppercase;letter-spacing:.08em}
+.result-card pre{font-family:"SF Mono","Fira Code",monospace;font-size:.8rem;white-space:pre-wrap;word-break:break-word;color:#bbf7d0}
+.result-meta{font-size:.75rem;color:#4ade80;margin-top:7px;opacity:.7}
+#bottom{padding:12px 18px;border-top:1px solid #1e2430;background:#141921;display:flex;flex-direction:column;gap:6px;position:relative}
+#cmd-suggestions{display:none;position:absolute;bottom:100%;left:18px;right:18px;background:#1a2235;border:1px solid #2d3f5e;border-radius:8px;overflow:hidden;max-height:220px;overflow-y:auto;z-index:50}
+.cmd-item{padding:7px 12px;cursor:pointer;display:flex;gap:12px;font-size:.82rem}
+.cmd-item:hover,.cmd-item.active{background:#2d3f5e}
+.cmd-item .cmd-name{color:#93c5fd;font-family:"SF Mono","Fira Code",monospace;flex-shrink:0;min-width:110px}
+.cmd-item .cmd-desc{color:#64748b}
+#input-row{display:flex;gap:8px}
+#input{flex:1;background:#1e2430;border:1px solid #374151;border-radius:10px;color:#e2e8f0;padding:9px 13px;font-size:.875rem;resize:none;outline:none;max-height:160px;line-height:1.4}
+#input:focus{border-color:#3b82f6}
+#send-btn{padding:9px 16px;background:#3b82f6;color:#fff;border:none;border-radius:10px;font-size:.875rem;font-weight:500;cursor:pointer;align-self:flex-end;transition:background .15s}
+#send-btn:hover{background:#2563eb}
+#send-btn:disabled{background:#374151;cursor:not-allowed}
+#hint{font-size:.72rem;color:#334155;padding:0 2px}
+#setup-overlay{position:fixed;inset:0;background:rgba(0,0,0,.75);display:flex;align-items:center;justify-content:center;z-index:100}
+#setup-box{background:#141921;border:1px solid #2d3f5e;border-radius:16px;padding:30px;width:360px;display:flex;flex-direction:column;gap:16px}
+#setup-box h2{font-size:1.05rem;color:#e2e8f0}
+#setup-box p{font-size:.82rem;color:#64748b}
+.field{display:flex;flex-direction:column;gap:5px}
+.field label{font-size:.82rem;color:#94a3b8}
+.field input{background:#0f1117;border:1px solid #374151;border-radius:8px;color:#e2e8f0;padding:8px 12px;font-size:.875rem;outline:none}
+.field input:focus{border-color:#3b82f6}
+#start-btn{padding:10px;background:#3b82f6;color:#fff;border:none;border-radius:8px;font-size:.9rem;font-weight:600;cursor:pointer}
+#start-btn:hover{background:#2563eb}
+#setup-error{color:#fca5a5;font-size:.8rem;display:none}
 </style>
 </head>
 <body>
@@ -274,316 +136,593 @@ _CHAT_HTML = """<!DOCTYPE html>
 <header>
   <div id="status-dot"></div>
   <h1>DAAP</h1>
-  <span id="session-label" style="font-size:0.75rem;color:#475569;margin-left:auto"></span>
+  <div id="header-right">
+    <span id="raw-badge">RAW</span>
+    <span id="session-label"></span>
+  </div>
 </header>
 
 <div id="messages"></div>
 
 <div id="bottom">
-  <textarea id="input" rows="1" placeholder="Describe a task…" disabled></textarea>
-  <button id="send-btn" disabled>Send</button>
+  <div id="cmd-suggestions"></div>
+  <div id="input-row">
+    <textarea id="input" rows="1" placeholder="Message or /command..." disabled></textarea>
+    <button id="send-btn" disabled>Send</button>
+  </div>
+  <div id="hint">Enter to send · Shift+Enter for newline · /help for commands</div>
 </div>
 
 <script>
 const AUTH_ENABLED = __AUTH_ENABLED__;
-let ws = null;
-let sessionId = null;
-let apiKey = "";
-let pendingPlanEl = null;
 
-// ── Setup overlay ──────────────────────────────────────────────────────────
-const overlay = document.getElementById("setup-overlay");
-const keyField = document.getElementById("key-field");
-if (AUTH_ENABLED) keyField.style.display = "";
+const CMD_DEFS = [
+  ['/help',     'Show all commands'],
+  ['/approve',  'Approve pending plan'],
+  ['/cheaper',  'Make plan cheaper'],
+  ['/cancel',   'Cancel pending plan'],
+  ['/clear',    'Clear conversation display'],
+  ['/history',  'List saved topologies'],
+  ['/topology', 'List topologies  /topology load <id-prefix>'],
+  ['/memory',   'Show memory  /memory search <q>  /memory clear'],
+  ['/profile',  'Show user profile + memory facts'],
+  ['/sessions', 'List active server sessions'],
+  ['/rate',     '/rate <1-5> [comment]  rate last execution'],
+  ['/raw',      'Show raw agent output including JSON'],
+  ['/clean',    'Show clean agent output (default)'],
+  ['/mcp',      'MCP server status'],
+  ['/skills',   'List loaded skills'],
+  ['/quit',     'Clear saved session and disconnect'],
+];
 
-document.getElementById("start-btn").addEventListener("click", async () => {
-  const userId = document.getElementById("uid-input").value.trim();
-  if (!userId) { showSetupError("Enter a user ID"); return; }
-  apiKey = document.getElementById("key-input").value.trim();
-  if (AUTH_ENABLED && !apiKey) { showSetupError("Enter the API key"); return; }
-  await startSession(userId);
-});
+let ws = null, sessionId = null, userId = null, apiKey = '';
+let rawMode = false, hasResult = false;
+let pendingPlanEl = null, executingEl = null;
+let reconnectTimer = null, reconnectDelay = 2000, intentionalClose = false;
+let cmdSuggIdx = -1;
 
-document.getElementById("uid-input").addEventListener("keydown", e => {
-  if (e.key === "Enter") document.getElementById("start-btn").click();
-});
-
-function showSetupError(msg) {
-  const el = document.getElementById("setup-error");
-  el.textContent = msg;
-  el.style.display = "";
+function saveSession() {
+  try { localStorage.setItem('daap_s', JSON.stringify({sessionId, userId, apiKey})); } catch(e) {}
+}
+function clearStoredSession() {
+  try { localStorage.removeItem('daap_s'); } catch(e) {}
+}
+function loadStoredSession() {
+  try { return JSON.parse(localStorage.getItem('daap_s') || 'null'); } catch(e) { return null; }
 }
 
-// ── Session + WebSocket ────────────────────────────────────────────────────
-async function startSession(userId) {
-  const btn = document.getElementById("start-btn");
-  btn.disabled = true;
-  btn.textContent = "Connecting…";
-
-  const headers = { "Content-Type": "application/json" };
-  if (apiKey) headers["X-API-Key"] = apiKey;
-
-  const r = await fetch(`/session?user_id=${encodeURIComponent(userId)}`, {
-    method: "POST", headers,
-  });
-
-  if (!r.ok) {
-    const j = await r.json().catch(() => ({}));
-    showSetupError(j.detail || `Error ${r.status}`);
-    btn.disabled = false; btn.textContent = "Start chatting";
-    return;
+window.addEventListener('DOMContentLoaded', async () => {
+  if (AUTH_ENABLED) document.getElementById('key-field').style.display = '';
+  const stored = loadStoredSession();
+  if (stored && stored.sessionId && stored.userId) {
+    const hdrs = stored.apiKey ? {'X-API-Key': stored.apiKey} : {};
+    try {
+      const r = await fetch('/session/' + stored.sessionId + '/config', {headers: hdrs});
+      if (r.ok) {
+        sessionId = stored.sessionId;
+        userId    = stored.userId;
+        apiKey    = stored.apiKey || '';
+        document.getElementById('session-label').textContent = 'session: ' + sessionId.slice(0,8) + '...';
+        document.getElementById('setup-overlay').style.display = 'none';
+        connectWS();
+        return;
+      }
+    } catch(e) {}
+    document.getElementById('uid-input').value = stored.userId || '';
+    if (stored.apiKey) document.getElementById('key-input').value = stored.apiKey;
+  } else if (stored && stored.userId) {
+    document.getElementById('uid-input').value = stored.userId;
   }
+});
 
-  const { session_id } = await r.json();
-  sessionId = session_id;
-  document.getElementById("session-label").textContent = `session: ${session_id.slice(0,8)}…`;
-  overlay.style.display = "none";
-  connectWS();
+document.getElementById('start-btn').addEventListener('click', async () => {
+  const uid = document.getElementById('uid-input').value.trim();
+  if (!uid) { showSetupErr('Enter a user ID'); return; }
+  const key = document.getElementById('key-input').value.trim();
+  if (AUTH_ENABLED && !key) { showSetupErr('Enter the API key'); return; }
+  apiKey = key;
+  await startSession(uid);
+});
+document.getElementById('uid-input').addEventListener('keydown', function(e) {
+  if (e.key === 'Enter') document.getElementById('start-btn').click();
+});
+function showSetupErr(msg) {
+  const el = document.getElementById('setup-error');
+  el.textContent = msg; el.style.display = '';
+}
+
+async function startSession(uid) {
+  const btn = document.getElementById('start-btn');
+  btn.disabled = true; btn.textContent = 'Connecting...';
+  const hdrs = {'Content-Type': 'application/json'};
+  if (apiKey) hdrs['X-API-Key'] = apiKey;
+  try {
+    const r = await fetch('/session?user_id=' + encodeURIComponent(uid), {method: 'POST', headers: hdrs});
+    if (!r.ok) {
+      const j = await r.json().catch(function() { return {}; });
+      showSetupErr(j.detail || 'Error ' + r.status);
+      btn.disabled = false; btn.textContent = 'Start chatting';
+      return;
+    }
+    const data = await r.json();
+    sessionId = data.session_id;
+    userId    = uid;
+    saveSession();
+    document.getElementById('session-label').textContent = 'session: ' + sessionId.slice(0,8) + '...';
+    document.getElementById('setup-overlay').style.display = 'none';
+    connectWS();
+  } catch(e) {
+    showSetupErr('Connection failed: ' + e.message);
+    btn.disabled = false; btn.textContent = 'Start chatting';
+  }
 }
 
 function connectWS() {
-  const proto = location.protocol === "https:" ? "wss" : "ws";
-  const url = `${proto}://${location.host}/ws/${sessionId}${apiKey ? "?token=" + encodeURIComponent(apiKey) : ""}`;
+  clearTimeout(reconnectTimer);
+  intentionalClose = false;
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  const url = proto + '://' + location.host + '/ws/' + sessionId + (apiKey ? '?token=' + encodeURIComponent(apiKey) : '');
   ws = new WebSocket(url);
 
-  ws.onopen = () => {
-    document.getElementById("status-dot").classList.add("connected");
-    document.getElementById("input").disabled = false;
-    document.getElementById("send-btn").disabled = false;
-    document.getElementById("input").focus();
-    appendSystem("Connected. Describe a task to get started.");
+  ws.onopen = function() {
+    reconnectDelay = 2000;
+    document.getElementById('status-dot').classList.add('connected');
+    document.getElementById('input').disabled = false;
+    document.getElementById('send-btn').disabled = false;
+    document.getElementById('input').focus();
+    appendSystem('Connected. Type a message or /help for commands.');
   };
 
-  ws.onclose = () => {
-    document.getElementById("status-dot").classList.remove("connected");
-    document.getElementById("input").disabled = true;
-    document.getElementById("send-btn").disabled = true;
-    appendSystem("Disconnected. Refresh to reconnect.");
+  ws.onclose = function() {
+    document.getElementById('status-dot').classList.remove('connected');
+    document.getElementById('input').disabled = true;
+    document.getElementById('send-btn').disabled = true;
+    if (intentionalClose) return;
+    appendSystem('Disconnected. Reconnecting in ' + (reconnectDelay/1000).toFixed(0) + 's...');
+    reconnectTimer = setTimeout(function() {
+      reconnectDelay = Math.min(reconnectDelay * 2, 30000);
+      connectWS();
+    }, reconnectDelay);
   };
 
-  ws.onerror = () => appendError("WebSocket error.");
-
-  ws.onmessage = (e) => {
-    const data = JSON.parse(e.data);
-    handleMessage(data);
-  };
+  ws.onerror = function() {};
+  ws.onmessage = function(e) { handleWS(JSON.parse(e.data)); };
 }
 
-// ── Message handlers ───────────────────────────────────────────────────────
-function handleMessage(data) {
-  switch (data.type) {
-    case "response":
-      removePlanCard();
-      appendAgent(data.content, data.usage);
-      break;
-    case "questions":
-      appendQuestions(data.questions);
-      break;
-    case "plan":
-      appendPlan(data);
-      break;
-    case "executing":
-      appendExecuting(data.topology_id);
-      break;
-    case "result":
-      appendResult(data);
-      break;
-    case "error":
-      appendError(data.message);
-      break;
+function handleWS(data) {
+  if (data.type === 'response') {
+    removeExecuting(); removePlanCard(); appendAgent(data.content, data.usage);
+  } else if (data.type === 'questions') {
+    removeExecuting(); appendQuestions(data.questions);
+  } else if (data.type === 'plan') {
+    removeExecuting(); appendPlan(data);
+  } else if (data.type === 'executing') {
+    removeExecuting(); executingEl = appendExecuting(data.topology_id);
+  } else if (data.type === 'progress') {
+    updateProgress(data);
+  } else if (data.type === 'result') {
+    removeExecuting(); appendResult(data);
+    hasResult = true;
+    appendSystem('Rate this run: /rate <1-5> [comment]');
+  } else if (data.type === 'error') {
+    removeExecuting(); appendError(data.message);
   }
 }
 
-// ── Append helpers ─────────────────────────────────────────────────────────
-function scrollBottom() {
-  const m = document.getElementById("messages");
-  m.scrollTop = m.scrollHeight;
-}
-
-function appendMsg(el) {
-  document.getElementById("messages").appendChild(el);
-  scrollBottom();
-  return el;
-}
+function scrollBottom() { var m = document.getElementById('messages'); m.scrollTop = m.scrollHeight; }
+function appendMsg(el) { document.getElementById('messages').appendChild(el); scrollBottom(); return el; }
 
 function appendUser(text) {
-  const d = document.createElement("div");
-  d.className = "msg user";
-  d.textContent = text;
-  appendMsg(d);
+  var d = document.createElement('div');
+  d.className = 'msg user'; d.textContent = text;
+  return appendMsg(d);
+}
+
+function looksJson(s) {
+  var t = s.trim();
+  if (t.length < 2) return false;
+  if (!((t[0]==='{' && t[t.length-1]==='}') || (t[0]==='[' && t[t.length-1]===']'))) return false;
+  try { JSON.parse(t); return true; } catch(e) { return false; }
+}
+function summarizeJson(s) {
+  try {
+    var p = JSON.parse(s);
+    if (Array.isArray(p)) return 'Structured list (' + p.length + ' items). Use /raw to inspect.';
+    return 'Structured data (' + Object.keys(p).slice(0,4).join(', ') + '...). Use /raw to inspect.';
+  } catch(e) { return 'Structured data generated. Use /raw to inspect.'; }
+}
+function sanitize(text) {
+  if (rawMode) return text || '';
+  var s = (text || '').replace(/```(?:json)?\s*([\s\S]*?)```/gi, function(_, inner) {
+    inner = inner.trim();
+    if (looksJson(inner)) return summarizeJson(inner);
+    return inner;
+  });
+  if (looksJson(s.trim())) return summarizeJson(s.trim());
+  return s.replace(/\n{3,}/g, '\n\n').trim() || 'Done.';
 }
 
 function appendAgent(text, usage) {
-  const d = document.createElement("div");
-  d.className = "msg agent";
-  d.textContent = text;
+  var d = document.createElement('div');
+  d.className = 'msg agent';
+  d.textContent = sanitize(text);
   if (usage && usage.total_tokens) {
-    const m = document.createElement("div");
-    m.style.cssText = "font-size:0.75rem;color:#475569;margin-top:6px;";
-    m.textContent = `${usage.total_tokens} tokens · $${(usage.total_cost_usd||0).toFixed(4)}`;
-    d.appendChild(m);
+    var u = document.createElement('div');
+    u.className = 'usage-line';
+    u.textContent = usage.total_tokens + ' tokens  $' + (usage.total_cost_usd||0).toFixed(4);
+    d.appendChild(u);
   }
-  appendMsg(d);
+  return appendMsg(d);
 }
-
 function appendSystem(text) {
-  const d = document.createElement("div");
-  d.className = "msg system";
-  d.textContent = text;
-  appendMsg(d);
+  var d = document.createElement('div');
+  d.className = 'msg system'; d.textContent = text;
+  return appendMsg(d);
 }
-
 function appendError(text) {
-  const d = document.createElement("div");
-  d.className = "msg error";
-  d.textContent = "Error: " + text;
-  appendMsg(d);
+  var d = document.createElement('div');
+  d.className = 'msg error'; d.textContent = 'Error: ' + text;
+  return appendMsg(d);
 }
-
 function appendExecuting(topoId) {
-  const d = document.createElement("div");
-  d.className = "executing-row";
-  d.innerHTML = `<div class="spinner"></div><span>Executing pipeline${topoId ? " · " + topoId.slice(0,8) + "…" : ""}…</span>`;
-  appendMsg(d);
+  var d = document.createElement('div');
+  d.className = 'executing-row';
+  d.innerHTML = '<div class="spinner"></div><span id="exec-label">Executing pipeline' + (topoId ? ' ' + topoId.slice(0,8) + '...' : '') + '</span>';
+  return appendMsg(d);
 }
-
-function removePlanCard() {
-  if (pendingPlanEl) {
-    pendingPlanEl.remove();
-    pendingPlanEl = null;
+function removeExecuting() {
+  if (executingEl) { executingEl.remove(); executingEl = null; }
+}
+function updateProgress(data) {
+  var label = document.getElementById('exec-label');
+  if (!label) return;
+  var done = data.completed_nodes || 0, total = data.total_nodes || 0;
+  var filled = total ? Math.round((done/total)*20) : 0;
+  var bar = '█'.repeat(filled) + '░'.repeat(20-filled);
+  if (data.event === 'node_start') {
+    label.textContent = '[' + bar + '] ' + done + '/' + total + '  running: ' + (data.node_id||'');
+  } else if (data.event === 'node_complete') {
+    label.textContent = '[' + bar + '] ' + done + '/' + total + (done >= total ? '  done' : '  done: ' + (data.node_id||''));
   }
+}
+function removePlanCard() { if (pendingPlanEl) { pendingPlanEl.remove(); pendingPlanEl = null; } }
+
+function esc(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
 function appendPlan(data) {
   removePlanCard();
-  const card = document.createElement("div");
-  card.className = "plan-card";
-  const cost = (data.cost_usd || 0).toFixed(4);
-  const minCost = (data.min_cost_usd || 0).toFixed(4);
-  const lat = (data.latency_seconds || 0).toFixed(1);
-  card.innerHTML = `
-    <h3>Proposed Plan</h3>
-    <div class="summary">${esc(data.summary || "")}</div>
-    <div class="plan-meta">
-      <span>Est. cost: <b>$${cost}</b> (min $${minCost})</span>
-      <span>Est. time: <b>${lat}s</b></span>
-    </div>
-    <div class="plan-actions">
-      <button class="btn btn-approve">Approve</button>
-      <button class="btn btn-cheaper">Make cheaper</button>
-      <button class="btn btn-cancel">Cancel</button>
-    </div>`;
-  card.querySelector(".btn-approve").addEventListener("click", () => {
-    ws.send(JSON.stringify({ type: "message", content: "approve" }));
-    disablePlanBtns(card);
-    appendUser("approve");
-  });
-  card.querySelector(".btn-cheaper").addEventListener("click", () => {
-    ws.send(JSON.stringify({ type: "make_cheaper" }));
-    disablePlanBtns(card);
-    appendUser("make cheaper");
-  });
-  card.querySelector(".btn-cancel").addEventListener("click", () => {
-    ws.send(JSON.stringify({ type: "cancel" }));
-    disablePlanBtns(card);
-    appendUser("cancel");
-  });
+  var card = document.createElement('div');
+  card.className = 'plan-card';
+  var cost = (data.cost_usd||0).toFixed(4), minC = (data.min_cost_usd||0).toFixed(4), lat = (data.latency_seconds||0).toFixed(1);
+  card.innerHTML =
+    '<h3>Proposed Plan</h3>' +
+    '<div class="summary">' + esc(data.summary||'') + '</div>' +
+    '<div class="plan-meta"><span>Cost: <b>$' + cost + '</b> (min $' + minC + ')</span><span>Time: <b>' + lat + 's</b></span></div>' +
+    '<div class="plan-actions">' +
+      '<button class="btn btn-approve">Approve</button>' +
+      '<button class="btn btn-cheaper">Make cheaper</button>' +
+      '<button class="btn btn-cancel">Cancel</button>' +
+    '</div>';
+  card.querySelector('.btn-approve').onclick = function() {
+    ws.send(JSON.stringify({type:'message',content:'approve'}));
+    disablePlanBtns(card); appendUser('approve');
+  };
+  card.querySelector('.btn-cheaper').onclick = function() {
+    ws.send(JSON.stringify({type:'make_cheaper'}));
+    disablePlanBtns(card); appendUser('/cheaper');
+  };
+  card.querySelector('.btn-cancel').onclick = function() {
+    ws.send(JSON.stringify({type:'cancel'}));
+    disablePlanBtns(card); appendUser('/cancel');
+  };
   pendingPlanEl = appendMsg(card);
 }
-
-function disablePlanBtns(card) {
-  card.querySelectorAll(".btn").forEach(b => b.disabled = true);
-}
+function disablePlanBtns(card) { card.querySelectorAll('.btn').forEach(function(b) { b.disabled = true; }); }
 
 function appendQuestions(questions) {
-  const card = document.createElement("div");
-  card.className = "questions-card";
-  card.innerHTML = `<h3>Questions</h3>`;
-  const inputs = [];
-  questions.forEach((q, i) => {
-    const item = document.createElement("div");
-    item.className = "q-item";
-    const label = document.createElement("label");
-    label.textContent = (i + 1) + ". " + (typeof q === "string" ? q : q.question || JSON.stringify(q));
-    item.appendChild(label);
-    let input;
-    if (typeof q === "object" && q.options) {
-      input = document.createElement("select");
-      q.options.forEach(opt => {
-        const o = document.createElement("option");
-        o.value = opt; o.textContent = opt;
-        input.appendChild(o);
+  var card = document.createElement('div');
+  card.className = 'questions-card';
+  card.innerHTML = '<h3>Questions</h3>';
+  var inputs = [];
+  questions.forEach(function(q, i) {
+    var item = document.createElement('div');
+    item.className = 'q-item';
+    var lbl = document.createElement('label');
+    lbl.textContent = (i+1) + '. ' + (typeof q === 'string' ? q : q.question || JSON.stringify(q));
+    item.appendChild(lbl);
+    var inp;
+    if (typeof q === 'object' && q.options) {
+      inp = document.createElement('select');
+      q.options.forEach(function(o) {
+        var opt = document.createElement('option');
+        var label = typeof o === 'string' ? o : (o.label || JSON.stringify(o));
+        opt.value = label;
+        opt.textContent = label + (o.description ? ' - ' + o.description : '');
+        inp.appendChild(opt);
       });
     } else {
-      input = document.createElement("input");
-      input.type = "text";
-      input.placeholder = "Your answer…";
+      inp = document.createElement('input');
+      inp.type = 'text'; inp.placeholder = 'Your answer...';
     }
-    item.appendChild(input);
-    inputs.push(input);
-    card.appendChild(item);
+    item.appendChild(inp); inputs.push(inp); card.appendChild(item);
   });
-  const submitBtn = document.createElement("button");
-  submitBtn.className = "btn btn-approve";
-  submitBtn.textContent = "Submit answers";
-  submitBtn.addEventListener("click", () => {
-    const answers = inputs.map(inp => inp.value || inp.options?.[inp.selectedIndex]?.value || "");
-    ws.send(JSON.stringify({ type: "answer", answers }));
-    submitBtn.disabled = true;
-    inputs.forEach(i => i.disabled = true);
-  });
-  card.appendChild(submitBtn);
+  var sub = document.createElement('button');
+  sub.className = 'btn btn-approve'; sub.textContent = 'Submit answers';
+  sub.onclick = function() {
+    var answers = inputs.map(function(i) {
+      return i.tagName === 'SELECT' ? (i.options[i.selectedIndex] ? i.options[i.selectedIndex].value : '') : i.value;
+    });
+    ws.send(JSON.stringify({type:'answer', answers:answers}));
+    sub.disabled = true;
+    inputs.forEach(function(i) { i.disabled = true; });
+  };
+  card.appendChild(sub);
   appendMsg(card);
 }
 
 function appendResult(data) {
-  const card = document.createElement("div");
-  card.className = "result-card";
-  const output = typeof data.output === "string" ? data.output : JSON.stringify(data.output, null, 2);
-  const cost = data.cost_usd != null ? `$${parseFloat(data.cost_usd).toFixed(4)}` : "";
-  const lat = data.latency_seconds != null ? `${parseFloat(data.latency_seconds).toFixed(1)}s` : "";
-  card.innerHTML = `<h3>Result</h3><pre>${esc(output)}</pre>`;
+  var card = document.createElement('div');
+  card.className = 'result-card';
+  var out = typeof data.output === 'string' ? data.output : JSON.stringify(data.output, null, 2);
+  var cost = data.cost_usd != null ? '$' + parseFloat(data.cost_usd).toFixed(4) : '';
+  var lat  = data.latency_seconds != null ? parseFloat(data.latency_seconds).toFixed(1) + 's' : '';
+  card.innerHTML = '<h3>Result</h3><pre>' + esc(out) + '</pre>';
   if (cost || lat) {
-    const meta = document.createElement("div");
-    meta.className = "result-meta";
-    meta.textContent = [cost, lat].filter(Boolean).join(" · ");
-    card.appendChild(meta);
+    var m = document.createElement('div');
+    m.className = 'result-meta'; m.textContent = [cost, lat].filter(Boolean).join(' · ');
+    card.appendChild(m);
   }
   appendMsg(card);
 }
 
-function esc(s) {
-  return String(s)
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
+// Command palette
+var suggestEl = document.getElementById('cmd-suggestions');
+
+function showSuggestions(prefix) {
+  var matches = CMD_DEFS.filter(function(c) { return c[0].startsWith(prefix); });
+  if (!matches.length || prefix === '/') {
+    if (prefix === '/') matches = CMD_DEFS;
+    else { hideSuggestions(); return; }
+  }
+  suggestEl.innerHTML = '';
+  cmdSuggIdx = -1;
+  matches.forEach(function(pair) {
+    var item = document.createElement('div');
+    item.className = 'cmd-item';
+    item.innerHTML = '<span class="cmd-name">' + pair[0] + '</span><span class="cmd-desc">' + pair[1] + '</span>';
+    item.addEventListener('mousedown', function(e) { e.preventDefault(); fillCommand(pair[0]); });
+    suggestEl.appendChild(item);
+  });
+  suggestEl.style.display = '';
+}
+function hideSuggestions() { suggestEl.style.display = 'none'; cmdSuggIdx = -1; }
+function fillCommand(cmd) {
+  var inp = document.getElementById('input');
+  inp.value = cmd + ' ';
+  inp.focus(); hideSuggestions();
+}
+function moveSugg(dir) {
+  var items = suggestEl.querySelectorAll('.cmd-item');
+  if (!items.length) return;
+  if (cmdSuggIdx >= 0) items[cmdSuggIdx].classList.remove('active');
+  cmdSuggIdx = (cmdSuggIdx + dir + items.length) % items.length;
+  items[cmdSuggIdx].classList.add('active');
+  items[cmdSuggIdx].scrollIntoView({block:'nearest'});
 }
 
-// ── Send ───────────────────────────────────────────────────────────────────
-const inputEl = document.getElementById("input");
-const sendBtn = document.getElementById("send-btn");
+function authHeaders() {
+  var h = {'Content-Type':'application/json'};
+  if (apiKey) h['X-API-Key'] = apiKey;
+  return h;
+}
+function apiHeaders() {
+  return apiKey ? {'X-API-Key': apiKey} : {};
+}
+
+async function runCommand(input) {
+  var parts = input.trim().split(/\s+/);
+  var cmd = parts[0].toLowerCase();
+  var args = parts.slice(1);
+
+  if (cmd === '/help') {
+    var lines = CMD_DEFS.map(function(c) { return (c[0] + '             ').slice(0,14) + ' ' + c[1]; });
+    appendSystem('Commands:\n' + lines.join('\n'));
+  } else if (cmd === '/approve') {
+    if (!ws || ws.readyState !== WebSocket.OPEN) { appendSystem('Not connected.'); return; }
+    ws.send(JSON.stringify({type:'message', content:'approve'}));
+    appendUser('approve');
+  } else if (cmd === '/cheaper') {
+    if (!ws || ws.readyState !== WebSocket.OPEN) { appendSystem('Not connected.'); return; }
+    ws.send(JSON.stringify({type:'make_cheaper'}));
+    appendUser('/cheaper');
+  } else if (cmd === '/cancel') {
+    if (!ws || ws.readyState !== WebSocket.OPEN) { appendSystem('Not connected.'); return; }
+    ws.send(JSON.stringify({type:'cancel'}));
+    appendUser('/cancel');
+  } else if (cmd === '/clear') {
+    document.getElementById('messages').innerHTML = '';
+    appendSystem('Conversation display cleared.');
+  } else if (cmd === '/raw') {
+    rawMode = true;
+    document.getElementById('raw-badge').style.display = '';
+    appendSystem('Raw mode on - JSON shown as-is.');
+  } else if (cmd === '/clean') {
+    rawMode = false;
+    document.getElementById('raw-badge').style.display = 'none';
+    appendSystem('Clean mode on.');
+  } else if (cmd === '/quit') {
+    intentionalClose = true;
+    clearStoredSession();
+    if (ws) ws.close();
+    appendSystem('Session cleared. Refresh to start a new session.');
+  } else if (cmd === '/rate') {
+    await cmdRate(args);
+  } else if (cmd === '/history' || cmd === '/topology') {
+    await cmdTopology(args);
+  } else if (cmd === '/memory') {
+    await cmdMemory(args);
+  } else if (cmd === '/profile') {
+    await cmdProfile();
+  } else if (cmd === '/sessions') {
+    await cmdSessions();
+  } else if (cmd === '/mcp') {
+    appendSystem('MCP servers run server-side. The agent uses them automatically.\nTo add/remove: edit ~/.daap/mcpx.json on the server and restart.');
+  } else if (cmd === '/skills') {
+    appendSystem('Skills are loaded server-side and injected into the master agent prompt automatically.');
+  } else {
+    appendSystem('Unknown command: ' + cmd + '. Type /help.');
+  }
+}
+
+async function cmdRate(args) {
+  if (!hasResult) { appendSystem('No execution result to rate yet. Run a topology first.'); return; }
+  var n = parseInt(args[0]);
+  if (!n || n < 1 || n > 5) { appendSystem('Usage: /rate <1-5> [comment]'); return; }
+  var comment = args.slice(1).join(' ');
+  try {
+    var r = await fetch('/rate', {method:'POST', headers:authHeaders(), body:JSON.stringify({session_id:sessionId, rating:n, comment:comment})});
+    if (r.ok) {
+      appendSystem('Rated ' + '★'.repeat(n) + '☆'.repeat(5-n) + ' (' + n + '/5). Optimizer updated.');
+      hasResult = false;
+    } else {
+      appendSystem('Rating failed: ' + r.status);
+    }
+  } catch(e) { appendSystem('Rating error: ' + e.message); }
+}
+
+async function cmdTopology(args) {
+  if (args[0] === 'load' && args[1]) {
+    if (!ws || ws.readyState !== WebSocket.OPEN) { appendSystem('Not connected.'); return; }
+    ws.send(JSON.stringify({type:'message', content:'Load topology ' + args.slice(1).join(' ') + ' and prepare it for execution'}));
+    appendUser('/topology load ' + args.slice(1).join(' '));
+    return;
+  }
+  try {
+    var r = await fetch('/api/v1/topologies/' + encodeURIComponent(userId), {headers:apiHeaders()});
+    if (!r.ok) { appendSystem('Could not fetch topologies: ' + r.status); return; }
+    var data = await r.json();
+    var topos = data.topologies;
+    if (!topos.length) { appendSystem('No topologies saved yet.'); return; }
+    var lines = topos.map(function(t) { return t.topology_id.slice(0,12) + '  ' + t.updated_at + '  ' + t.name + '  [v' + t.version + ']'; });
+    appendSystem('Saved topologies (' + topos.length + '):\n' + lines.join('\n') + '\nUse /topology load <id-prefix> to reload.');
+  } catch(e) { appendSystem('Topology error: ' + e.message); }
+}
+
+async function cmdMemory(args) {
+  var sub = (args[0] || '').toLowerCase();
+  if (sub === 'clear') {
+    if (!confirm('Delete ALL memory facts for ' + userId + '?')) { appendSystem('Cancelled.'); return; }
+    try {
+      var r = await fetch('/api/v1/memory/' + encodeURIComponent(userId), {method:'DELETE', headers:apiHeaders()});
+      appendSystem(r.ok ? 'All memory deleted.' : 'Delete failed: ' + r.status);
+    } catch(e) { appendSystem('Memory error: ' + e.message); }
+    return;
+  }
+  if (sub === 'search' && args[1]) {
+    var q = args.slice(1).join(' ');
+    try {
+      var r = await fetch('/api/v1/memory/' + encodeURIComponent(userId) + '/history?q=' + encodeURIComponent(q), {headers:apiHeaders()});
+      if (!r.ok) { appendSystem('Search failed: ' + r.status); return; }
+      var data = await r.json();
+      var hist = data.history;
+      if (!hist.length) { appendSystem('No results for "' + q + '".'); return; }
+      appendSystem('Memory search "' + q + '" (' + hist.length + '):\n' + hist.map(function(h,i) { return (i+1)+'. '+h; }).join('\n'));
+    } catch(e) { appendSystem('Memory error: ' + e.message); }
+    return;
+  }
+  try {
+    var r = await fetch('/api/v1/memory/' + encodeURIComponent(userId) + '/profile', {headers:apiHeaders()});
+    if (!r.ok) { appendSystem('Memory unavailable: ' + r.status); return; }
+    var data = await r.json();
+    var profile = data.profile;
+    if (!profile.length) { appendSystem('No memory facts stored.\nUsage: /memory search <query>  /memory clear'); return; }
+    appendSystem('Memory facts (' + profile.length + '):\n' + profile.map(function(f,i) { return (i+1)+'. '+f; }).join('\n') + '\nUsage: /memory search <query>  /memory clear');
+  } catch(e) { appendSystem('Memory error: ' + e.message); }
+}
+
+async function cmdProfile() {
+  var lines = ['User: ' + userId, 'Session: ' + sessionId];
+  try {
+    var r = await fetch('/api/v1/memory/' + encodeURIComponent(userId) + '/profile', {headers:apiHeaders()});
+    if (r.ok) {
+      var data = await r.json();
+      var profile = data.profile;
+      if (profile.length) {
+        lines.push('Memory (' + profile.length + ' facts):');
+        profile.slice(0,5).forEach(function(f) { lines.push('  - ' + f); });
+        if (profile.length > 5) lines.push('  [+ ' + (profile.length-5) + ' more]');
+      } else {
+        lines.push('Memory: no facts yet');
+      }
+    } else {
+      lines.push('Memory: unavailable');
+    }
+  } catch(e) { lines.push('Memory: unavailable'); }
+  appendSystem(lines.join('\n'));
+}
+
+async function cmdSessions() {
+  try {
+    var r = await fetch('/sessions', {headers:apiHeaders()});
+    if (!r.ok) { appendSystem('Could not fetch sessions: ' + r.status); return; }
+    var data = await r.json();
+    var sessions = data.sessions;
+    if (!sessions.length) { appendSystem('No sessions.'); return; }
+    var lines = sessions.map(function(s) { return s.slice(0,12) + (s === sessionId ? ' <- current' : ''); });
+    appendSystem('Server sessions (' + sessions.length + '):\n' + lines.join('\n'));
+  } catch(e) { appendSystem('Sessions error: ' + e.message); }
+}
+
+var inputEl = document.getElementById('input');
+var sendBtn = document.getElementById('send-btn');
 
 function send() {
-  const text = inputEl.value.trim();
-  if (!text || !ws || ws.readyState !== WebSocket.OPEN) return;
-  ws.send(JSON.stringify({ type: "message", content: text }));
+  var text = inputEl.value.trim();
+  if (!text) return;
+  hideSuggestions();
+  if (text.startsWith('/')) {
+    inputEl.value = ''; inputEl.style.height = '';
+    runCommand(text);
+    return;
+  }
+  if (!ws || ws.readyState !== WebSocket.OPEN) { appendSystem('Not connected.'); return; }
+  ws.send(JSON.stringify({type:'message', content:text}));
   appendUser(text);
-  inputEl.value = "";
-  inputEl.style.height = "";
+  inputEl.value = ''; inputEl.style.height = '';
 }
 
-sendBtn.addEventListener("click", send);
-inputEl.addEventListener("keydown", e => {
-  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
+sendBtn.addEventListener('click', send);
+
+inputEl.addEventListener('keydown', function(e) {
+  if (suggestEl.style.display !== 'none') {
+    if (e.key === 'ArrowDown') { e.preventDefault(); moveSugg(1); return; }
+    if (e.key === 'ArrowUp')   { e.preventDefault(); moveSugg(-1); return; }
+    if (e.key === 'Tab' || (e.key === 'Enter' && cmdSuggIdx >= 0)) {
+      var active = suggestEl.querySelector('.cmd-item.active');
+      if (active) {
+        e.preventDefault();
+        fillCommand(active.querySelector('.cmd-name').textContent);
+        return;
+      }
+    }
+    if (e.key === 'Escape') { hideSuggestions(); return; }
+  }
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
 });
-inputEl.addEventListener("input", () => {
-  inputEl.style.height = "auto";
-  inputEl.style.height = Math.min(inputEl.scrollHeight, 160) + "px";
+
+inputEl.addEventListener('input', function() {
+  inputEl.style.height = 'auto';
+  inputEl.style.height = Math.min(inputEl.scrollHeight, 160) + 'px';
+  var val = inputEl.value;
+  if (val.startsWith('/')) showSuggestions(val.split(' ')[0]);
+  else hideSuggestions();
 });
 </script>
 </body>
 </html>"""
+
 
 # Global singletons
 _session_store = SessionStore()
