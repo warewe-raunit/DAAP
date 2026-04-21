@@ -53,13 +53,33 @@ _CHAT_HTML = r"""<!DOCTYPE html>
 <style>
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
 body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#0f1117;color:#e2e8f0;height:100dvh;display:flex;flex-direction:column}
-header{padding:10px 18px;border-bottom:1px solid #1e2430;display:flex;align-items:center;gap:10px;background:#141921;min-height:44px}
+header{padding:10px 18px;border-bottom:1px solid #1e2430;display:flex;align-items:center;gap:10px;background:#141921;min-height:44px;flex-shrink:0}
 header h1{font-size:.95rem;font-weight:600;color:#94a3b8;letter-spacing:.05em}
 #status-dot{width:8px;height:8px;border-radius:50%;background:#ef4444;flex-shrink:0;transition:background .3s}
 #status-dot.connected{background:#22c55e}
 #header-right{margin-left:auto;display:flex;align-items:center;gap:12px}
 #session-label{font-size:.72rem;color:#475569}
 #raw-badge{font-size:.7rem;padding:2px 7px;border-radius:4px;background:#1d4ed8;color:#bfdbfe;display:none}
+#sidebar-toggle{background:none;border:none;color:#64748b;cursor:pointer;font-size:1.1rem;padding:2px 6px;border-radius:5px;line-height:1}
+#sidebar-toggle:hover{background:#1e2430;color:#94a3b8}
+#app-body{flex:1;display:flex;overflow:hidden}
+#sidebar{width:220px;background:#0c0f16;border-right:1px solid #1e2430;display:flex;flex-direction:column;flex-shrink:0;transition:width .2s,opacity .2s}
+#sidebar.collapsed{width:0;opacity:0;overflow:hidden}
+#sidebar-header{padding:10px 12px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid #1e2430;flex-shrink:0}
+#sidebar-header span{font-size:.72rem;color:#475569;text-transform:uppercase;letter-spacing:.08em}
+#new-session-btn{padding:3px 9px;background:#1d4ed8;color:#bfdbfe;border:none;border-radius:5px;font-size:.75rem;font-weight:600;cursor:pointer}
+#new-session-btn:hover{background:#2563eb}
+#session-list{flex:1;overflow-y:auto;padding:6px 0}
+.sess-item{padding:8px 12px;cursor:pointer;border-bottom:1px solid #111827;transition:background .12s}
+.sess-item:hover{background:#141921}
+.sess-item.active{background:#1a2235;border-left:3px solid #3b82f6}
+.sess-item.active .sess-id{color:#93c5fd}
+.sess-id{font-size:.75rem;font-family:"SF Mono","Fira Code",monospace;color:#64748b;word-break:break-all}
+.sess-meta{font-size:.68rem;color:#374151;margin-top:2px}
+.sess-badge{display:inline-block;font-size:.62rem;padding:1px 5px;border-radius:3px;margin-left:4px;vertical-align:middle}
+.sess-badge.exec{background:#78350f;color:#fbbf24}
+.sess-badge.topo{background:#1e3a5f;color:#93c5fd}
+#chat-area{flex:1;display:flex;flex-direction:column;overflow:hidden}
 #messages{flex:1;overflow-y:auto;padding:18px;display:flex;flex-direction:column;gap:12px}
 .msg{max-width:740px;padding:11px 15px;border-radius:12px;line-height:1.55;font-size:.875rem;white-space:pre-wrap;word-break:break-word}
 .msg.user{background:#1e40af;align-self:flex-end;color:#e0e7ff;border-bottom-right-radius:3px}
@@ -88,7 +108,7 @@ header h1{font-size:.95rem;font-weight:600;color:#94a3b8;letter-spacing:.05em}
 .result-card h3{font-size:.78rem;color:#4ade80;margin-bottom:8px;text-transform:uppercase;letter-spacing:.08em}
 .result-card pre{font-family:"SF Mono","Fira Code",monospace;font-size:.8rem;white-space:pre-wrap;word-break:break-word;color:#bbf7d0}
 .result-meta{font-size:.75rem;color:#4ade80;margin-top:7px;opacity:.7}
-#bottom{padding:12px 18px;border-top:1px solid #1e2430;background:#141921;display:flex;flex-direction:column;gap:6px;position:relative}
+#bottom{padding:12px 18px;border-top:1px solid #1e2430;background:#141921;display:flex;flex-direction:column;gap:6px;position:relative;flex-shrink:0}
 #cmd-suggestions{display:none;position:absolute;bottom:100%;left:18px;right:18px;background:#1a2235;border:1px solid #2d3f5e;border-radius:8px;overflow:hidden;max-height:220px;overflow-y:auto;z-index:50}
 .cmd-item{padding:7px 12px;cursor:pointer;display:flex;gap:12px;font-size:.82rem}
 .cmd-item:hover,.cmd-item.active{background:#2d3f5e}
@@ -134,6 +154,7 @@ header h1{font-size:.95rem;font-weight:600;color:#94a3b8;letter-spacing:.05em}
 </div>
 
 <header>
+  <button id="sidebar-toggle" title="Toggle sessions panel">☰</button>
   <div id="status-dot"></div>
   <h1>DAAP</h1>
   <div id="header-right">
@@ -142,15 +163,25 @@ header h1{font-size:.95rem;font-weight:600;color:#94a3b8;letter-spacing:.05em}
   </div>
 </header>
 
-<div id="messages"></div>
-
-<div id="bottom">
-  <div id="cmd-suggestions"></div>
-  <div id="input-row">
-    <textarea id="input" rows="1" placeholder="Message or /command..." disabled></textarea>
-    <button id="send-btn" disabled>Send</button>
+<div id="app-body">
+  <div id="sidebar">
+    <div id="sidebar-header">
+      <span>Sessions</span>
+      <button id="new-session-btn" title="Start new session">+ New</button>
+    </div>
+    <div id="session-list"></div>
   </div>
-  <div id="hint">Enter to send · Shift+Enter for newline · /help for commands</div>
+  <div id="chat-area">
+    <div id="messages"></div>
+    <div id="bottom">
+      <div id="cmd-suggestions"></div>
+      <div id="input-row">
+        <textarea id="input" rows="1" placeholder="Message or /command..." disabled></textarea>
+        <button id="send-btn" disabled>Send</button>
+      </div>
+      <div id="hint">Enter to send · Shift+Enter for newline · /help for commands</div>
+    </div>
+  </div>
 </div>
 
 <script>
@@ -180,6 +211,8 @@ let rawMode = false, hasResult = false;
 let pendingPlanEl = null, executingEl = null;
 let reconnectTimer = null, reconnectDelay = 2000, intentionalClose = false;
 let cmdSuggIdx = -1;
+let sidebarVisible = true;
+let sessionPollTimer = null;
 
 function saveSession() {
   try { localStorage.setItem('daap_s', JSON.stringify({sessionId, userId, apiKey})); } catch(e) {}
@@ -190,6 +223,103 @@ function clearStoredSession() {
 function loadStoredSession() {
   try { return JSON.parse(localStorage.getItem('daap_s') || 'null'); } catch(e) { return null; }
 }
+
+// ---------------------------------------------------------------------------
+// Sidebar: session list
+// ---------------------------------------------------------------------------
+
+function toggleSidebar() {
+  sidebarVisible = !sidebarVisible;
+  document.getElementById('sidebar').classList.toggle('collapsed', !sidebarVisible);
+}
+
+function fmtTime(ts) {
+  if (!ts) return '';
+  var d = new Date(ts * 1000);
+  var now = new Date();
+  if (d.toDateString() === now.toDateString()) {
+    return d.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
+  }
+  return d.toLocaleDateString([], {month:'short', day:'numeric'});
+}
+
+async function loadSessionList() {
+  if (!userId) return;
+  try {
+    var url = '/sessions?user_id=' + encodeURIComponent(userId);
+    var hdrs = apiKey ? {'X-API-Key': apiKey} : {};
+    var r = await fetch(url, {headers: hdrs});
+    if (!r.ok) return;
+    var data = await r.json();
+    renderSessionList(data.sessions || []);
+  } catch(e) {}
+}
+
+function renderSessionList(sessions) {
+  var list = document.getElementById('session-list');
+  list.innerHTML = '';
+  // Sort newest first by created_at
+  sessions.sort(function(a, b) { return (b.created_at || 0) - (a.created_at || 0); });
+  if (!sessions.length) {
+    var empty = document.createElement('div');
+    empty.style.cssText = 'padding:14px 12px;font-size:.72rem;color:#374151;text-align:center';
+    empty.textContent = 'No sessions yet';
+    list.appendChild(empty);
+    return;
+  }
+  sessions.forEach(function(s) {
+    var item = document.createElement('div');
+    item.className = 'sess-item' + (s.session_id === sessionId ? ' active' : '');
+    var shortId = s.session_id.slice(0, 12) + '…';
+    var meta = (s.message_count || 0) + ' msg · ' + fmtTime(s.created_at);
+    var badges = '';
+    if (s.is_executing) badges += '<span class="sess-badge exec">running</span>';
+    else if (s.has_pending_topology) badges += '<span class="sess-badge topo">plan ready</span>';
+    item.innerHTML =
+      '<div class="sess-id">' + shortId + badges + '</div>' +
+      '<div class="sess-meta">' + meta + '</div>';
+    item.addEventListener('click', function() { switchToSession(s.session_id); });
+    list.appendChild(item);
+  });
+}
+
+async function switchToSession(targetId) {
+  if (targetId === sessionId) return;
+  // Tear down current WS gracefully
+  intentionalClose = true;
+  clearTimeout(reconnectTimer);
+  if (ws) { ws.close(); ws = null; }
+  clearTimeout(sessionPollTimer);
+
+  sessionId = targetId;
+  saveSession();
+  document.getElementById('session-label').textContent = 'session: ' + sessionId.slice(0,8) + '...';
+  document.getElementById('messages').innerHTML = '';
+  hasResult = false; rawMode = false;
+  pendingPlanEl = null; executingEl = null;
+
+  appendSystem('Switched to session ' + sessionId.slice(0,8) + '…');
+  connectWS();
+  loadSessionList();
+  startSessionPoll();
+}
+
+function startSessionPoll() {
+  clearTimeout(sessionPollTimer);
+  sessionPollTimer = setTimeout(function() {
+    loadSessionList();
+    startSessionPoll();
+  }, 8000);
+}
+
+document.getElementById('sidebar-toggle').addEventListener('click', toggleSidebar);
+document.getElementById('new-session-btn').addEventListener('click', async function() {
+  if (!userId) return;
+  this.disabled = true; this.textContent = '…';
+  try { await startSession(userId); } finally {
+    this.disabled = false; this.textContent = '+ New';
+  }
+});
 
 window.addEventListener('DOMContentLoaded', async () => {
   if (AUTH_ENABLED) document.getElementById('key-field').style.display = '';
@@ -205,6 +335,8 @@ window.addEventListener('DOMContentLoaded', async () => {
         document.getElementById('session-label').textContent = 'session: ' + sessionId.slice(0,8) + '...';
         document.getElementById('setup-overlay').style.display = 'none';
         connectWS();
+        loadSessionList();
+        startSessionPoll();
         return;
       }
     } catch(e) {}
@@ -251,6 +383,8 @@ async function startSession(uid) {
     document.getElementById('session-label').textContent = 'session: ' + sessionId.slice(0,8) + '...';
     document.getElementById('setup-overlay').style.display = 'none';
     connectWS();
+    loadSessionList();
+    startSessionPoll();
   } catch(e) {
     showSetupErr('Connection failed: ' + e.message);
     btn.disabled = false; btn.textContent = 'Start chatting';
@@ -554,9 +688,10 @@ async function runCommand(input) {
     appendSystem('Clean mode on.');
   } else if (cmd === '/quit') {
     intentionalClose = true;
+    clearTimeout(sessionPollTimer);
     clearStoredSession();
     if (ws) ws.close();
-    appendSystem('Session cleared. Refresh to start a new session.');
+    appendSystem('Session cleared. Use "+ New" in the sidebar or refresh to start a new session.');
   } else if (cmd === '/rate') {
     await cmdRate(args);
   } else if (cmd === '/history' || cmd === '/topology') {
@@ -665,13 +800,20 @@ async function cmdProfile() {
 
 async function cmdSessions() {
   try {
-    var r = await fetch('/sessions', {headers:apiHeaders()});
+    var url = '/sessions' + (userId ? '?user_id=' + encodeURIComponent(userId) : '');
+    var r = await fetch(url, {headers:apiHeaders()});
     if (!r.ok) { appendSystem('Could not fetch sessions: ' + r.status); return; }
     var data = await r.json();
     var sessions = data.sessions;
-    if (!sessions.length) { appendSystem('No sessions.'); return; }
-    var lines = sessions.map(function(s) { return s.slice(0,12) + (s === sessionId ? ' <- current' : ''); });
-    appendSystem('Server sessions (' + sessions.length + '):\n' + lines.join('\n'));
+    if (!sessions.length) { appendSystem('No sessions. Use the sidebar "+ New" button to create one.'); return; }
+    sessions.sort(function(a,b){return (b.created_at||0)-(a.created_at||0);});
+    var lines = sessions.map(function(s) {
+      var tag = s.session_id === sessionId ? ' ← current' : '';
+      var state = s.is_executing ? ' [running]' : (s.has_pending_topology ? ' [plan ready]' : '');
+      return s.session_id.slice(0,14) + '  ' + (s.message_count||0) + ' msg' + state + tag;
+    });
+    appendSystem('Your sessions (' + sessions.length + '):\n' + lines.join('\n') + '\nUse the sidebar to switch sessions.');
+    loadSessionList();
   } catch(e) { appendSystem('Sessions error: ' + e.message); }
 }
 
@@ -1017,8 +1159,8 @@ async def get_session_config(session_id: str):
 
 
 @app.get("/sessions", dependencies=[Depends(require_api_key)])
-async def list_sessions():
-    return {"sessions": session_manager.list_sessions()}
+async def list_sessions(user_id: str | None = None):
+    return {"sessions": session_manager.list_sessions(user_id=user_id)}
 
 
 @app.delete("/session/{session_id}", dependencies=[Depends(require_api_key)])

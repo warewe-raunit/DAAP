@@ -419,14 +419,15 @@ class SessionManager:
         if self._store is not None:
             self._store.delete(session_id)
 
-    def list_sessions(self) -> list[dict]:
+    def list_sessions(self, user_id: str | None = None) -> list[dict]:
         if self._store is not None:
-            # Read from DB so all workers' sessions are visible, not just this
-            # worker's local dict. is_executing is live-only state; omit it.
             rows = self._store.load_active()
+            if user_id is not None:
+                rows = [r for r in rows if r.get("user_id") == user_id]
             return [
                 {
                     "session_id": r["session_id"],
+                    "user_id": r.get("user_id", "default"),
                     "created_at": r["created_at"],
                     "message_count": len(json.loads(r["conversation"] or "[]")),
                     "has_pending_topology": r["pending_topology"] is not None,
@@ -434,15 +435,19 @@ class SessionManager:
                 }
                 for r in rows
             ]
+        sessions = self._sessions.values()
+        if user_id is not None:
+            sessions = [s for s in sessions if s.user_id == user_id]
         return [
             {
                 "session_id": s.session_id,
+                "user_id": s.user_id,
                 "created_at": s.created_at,
                 "message_count": len(s.conversation),
                 "has_pending_topology": s.pending_topology is not None,
                 "is_executing": s.is_executing,
             }
-            for s in self._sessions.values()
+            for s in sessions
         ]
 
 
