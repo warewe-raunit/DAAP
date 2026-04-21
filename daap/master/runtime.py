@@ -25,6 +25,15 @@ def _safe_connected_mcp_servers() -> list[str]:
         return []
 
 
+def _safe_installed_tool_names() -> set[str]:
+    try:
+        from daap.tools.registry import get_available_tool_names
+
+        return get_available_tool_names(include_mcp_placeholders=False)
+    except Exception:
+        return set()
+
+
 def build_master_runtime_snapshot(
     toolkit,
     *,
@@ -37,6 +46,13 @@ def build_master_runtime_snapshot(
     extra: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build a deterministic, serializable runtime snapshot for prompt grounding."""
+    from daap.master.capability_registry import (
+        build_functional_capabilities,
+        build_known_gaps,
+    )
+
+    installed = _safe_installed_tool_names()
+
     snapshot: dict[str, Any] = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "agent_identity": "DAAP Master Agent",
@@ -46,6 +62,8 @@ def build_master_runtime_snapshot(
         "connected_mcp_servers": _safe_connected_mcp_servers(),
         "memory_status": _safe_memory_status(),
         "feature_flags": {},
+        "functional_capabilities": build_functional_capabilities(installed),
+        "known_gaps": build_known_gaps(installed),
     }
 
     flags = snapshot["feature_flags"]

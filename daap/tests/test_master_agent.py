@@ -491,3 +491,49 @@ def test_create_master_agent_openrouter(mock_react_cls, mock_tracked_cls):
     call_kwargs = mock_tracked_cls.call_args.kwargs
     assert call_kwargs["model_name"] == "anthropic/claude-sonnet-4-5"
     assert call_kwargs["client_kwargs"]["base_url"] == "https://openrouter.ai/api/v1"
+
+
+# ---------------------------------------------------------------------------
+# Runtime snapshot capability tests
+# ---------------------------------------------------------------------------
+
+def test_runtime_snapshot_includes_functional_capabilities():
+    """Runtime snapshot includes functional_capabilities list."""
+    from daap.master.runtime import build_master_runtime_snapshot
+    from unittest.mock import MagicMock
+
+    toolkit = MagicMock()
+    toolkit.tools = {}
+    snapshot = build_master_runtime_snapshot(toolkit, execution_mode="script")
+
+    assert "functional_capabilities" in snapshot
+    caps = snapshot["functional_capabilities"]
+    assert isinstance(caps, list)
+    assert len(caps) > 0
+    labels = {c["label"] for c in caps}
+    assert "Web search" in labels
+    assert "LinkedIn" in labels
+    for cap in caps:
+        assert "label" in cap
+        assert "available" in cap
+        assert isinstance(cap["available"], bool)
+
+
+def test_runtime_snapshot_includes_known_gaps():
+    """Runtime snapshot includes known_gaps list for uninstalled MCP capabilities."""
+    from daap.master.runtime import build_master_runtime_snapshot
+    from unittest.mock import MagicMock
+
+    toolkit = MagicMock()
+    toolkit.tools = {}
+    snapshot = build_master_runtime_snapshot(toolkit, execution_mode="script")
+
+    assert "known_gaps" in snapshot
+    gaps = snapshot["known_gaps"]
+    assert isinstance(gaps, list)
+    gap_labels = {g["label"] for g in gaps}
+    assert "LinkedIn" in gap_labels
+    for gap in gaps:
+        assert "label" in gap
+        assert "keywords" in gap
+        assert "install_cmd" in gap or "docs_url" in gap
