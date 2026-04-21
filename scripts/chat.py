@@ -17,6 +17,8 @@ Commands during chat:
     /clear       — clear conversation history (start fresh)
     /profile     — show user profile + optimizer summary
     /mcp         — show connected MCP servers and tools
+    /mcp add <name> --url <url> | --command <cmd> [--args ...] [--env KEY=VAL ...]
+    /mcp remove <name>
     /skills      — list registered skills
     /skill       — manage skills (add|remove|create)
     /raw         — show raw model output (including JSON)
@@ -113,6 +115,174 @@ def _parse_args() -> argparse.Namespace:
         help="Force a new session instead of resuming the last one.",
     )
     return parser.parse_args()
+
+
+# ---------------------------------------------------------------------------
+# MCP config helpers (~/.daap/mcpx.json)
+# ---------------------------------------------------------------------------
+
+def _mcpx_config_path() -> pathlib.Path:
+    return pathlib.Path.home() / ".daap" / "mcpx.json"
+
+
+def _mcpx_load() -> dict:
+    path = _mcpx_config_path()
+    if not path.exists():
+        return {"mcpServers": {}}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            return {"mcpServers": {}}
+        return data
+    except Exception:
+        return {"mcpServers": {}}
+
+
+def _mcpx_save(data: dict) -> None:
+    path = _mcpx_config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    os.replace(str(tmp), str(path))
+
+
+def _mcpx_add(name: str, cfg: dict) -> bool:
+    """Add/update server in mcpx.json. Returns True if newly added."""
+    data = _mcpx_load()
+    if "mcpServers" not in data:
+        data["mcpServers"] = {}
+    was_new = name not in data["mcpServers"]
+    data["mcpServers"][name] = cfg
+    _mcpx_save(data)
+    return was_new
+
+
+def _mcpx_remove(name: str) -> bool:
+    """Remove server from mcpx.json. Returns True if removed."""
+    data = _mcpx_load()
+    if "mcpServers" in data and name in data["mcpServers"]:
+        del data["mcpServers"][name]
+        _mcpx_save(data)
+        return True
+    if "servers" in data:
+        before = len(data["servers"])
+        data["servers"] = [s for s in data["servers"] if isinstance(s, dict) and s.get("name") != name]
+        if len(data["servers"]) < before:
+            _mcpx_save(data)
+            return True
+    return False
+
+
+def _mcpx_list_servers() -> list[tuple[str, dict]]:
+    """Return list of (name, cfg) for all configured servers."""
+    data = _mcpx_load()
+    if "mcpServers" in data and isinstance(data["mcpServers"], dict):
+        return list(data["mcpServers"].items())
+    if "servers" in data and isinstance(data["servers"], list):
+        result = []
+        for s in data["servers"]:
+            if isinstance(s, dict) and s.get("name"):
+                name = s["name"]
+                cfg = {k: v for k, v in s.items() if k != "name"}
+                result.append((name, cfg))
+        return result
+    return []
+
+
+def _parse_env_pairs(pairs: list[str]) -> dict:
+    out = {}
+    for p in pairs:
+        if "=" in p:
+            k, _, v = p.partition("=")
+            out[k.strip()] = v.strip()
+    return out
+
+
+def _mcp_cli(argv: list[str]) -> int:
+    """Handle `chat.py mcp <subcommand>` — edits ~/.daap/mcpx.json and exits."""
+    parser = argparse.ArgumentParser(
+        prog="chat.py mcp",
+        description="Manage DAAP MCP servers in ~/.daap/mcpx.json",
+    )
+    sub = parser.add_subparsers(dest="subcommand", required=True)
+
+    sub.add_parser("list", help="List configured MCP servers")
+
+    add_p = sub.add_parser("add", help="Add or update an MCP server")
+    add_p.add_argument("name", help="Server name (e.g. linkedin)")
+    grp = add_p.add_mutually_exclusive_group(required=True)
+    grp.add_argument("--command", "-c", help="Command for stdio transport (e.g. npx)")
+    grp.add_argument("--url", "-u", help="URL for HTTP/SSE transport")
+    add_p.add_argument("--args", nargs="*", default=[], metavar="ARG", help="Args for stdio command")
+    add_p.add_argument("--transport", default="streamable_http",
+                       choices=["streamable_http", "sse"], help="HTTP transport (default: streamable_http)")
+    add_p.add_argument("--env", nargs="*", default=[], metavar="KEY=VAL", help="Env vars (stdio)")
+    add_p.add_argument("--headers", nargs="*", default=[], metavar="KEY=VAL", help="HTTP headers")
+    add_p.add_argument("--default-tool", metavar="TOOL", help="Default tool alias")
+    add_p.add_argument("--no-stateful", action="store_true", help="Use stateless HTTP client")
+
+    rm_p = sub.add_parser("remove", help="Remove an MCP server")
+    rm_p.add_argument("name", help="Server name to remove")
+
+    try:
+        ns = parser.parse_args(argv)
+    except SystemExit as exc:
+        return int(exc.code or 0)
+
+    if ns.subcommand == "list":
+        servers = _mcpx_list_servers()
+        cfg_path = _mcpx_config_path()
+        if not servers:
+            print(f"{YELLOW}No MCP servers configured.{RESET}")
+            print(f"{DIM}Config: {cfg_path}{RESET}")
+        else:
+            print(f"{BOLD}MCP servers ({cfg_path}):{RESET}")
+            for name, cfg in servers:
+                transport_label = "http" if cfg.get("url") else "stdio"
+                print(f"  {GREEN}{name}{RESET}  [{transport_label}]")
+                if cfg.get("command"):
+                    args_str = " ".join(cfg.get("args") or [])
+                    print(f"    command: {cfg['command']} {args_str}".rstrip())
+                if cfg.get("url"):
+                    print(f"    url: {cfg['url']}")
+                if cfg.get("default_tool"):
+                    print(f"    default_tool: {cfg['default_tool']}")
+        return 0
+
+    if ns.subcommand == "add":
+        cfg: dict = {}
+        if ns.command:
+            cfg["command"] = ns.command
+            if ns.args:
+                cfg["args"] = ns.args
+            env = _parse_env_pairs(ns.env)
+            if env:
+                cfg["env"] = env
+        else:
+            cfg["url"] = ns.url
+            cfg["transport"] = ns.transport
+            if ns.no_stateful:
+                cfg["stateful"] = False
+            headers = _parse_env_pairs(ns.headers)
+            if headers:
+                cfg["headers"] = headers
+        if ns.default_tool:
+            cfg["default_tool"] = ns.default_tool
+
+        was_new = _mcpx_add(ns.name, cfg)
+        action = "added" if was_new else "updated"
+        print(f"{GREEN}MCP server '{ns.name}' {action}.{RESET}")
+        print(f"{DIM}Config: {_mcpx_config_path()}{RESET}")
+        return 0
+
+    if ns.subcommand == "remove":
+        if _mcpx_remove(ns.name):
+            print(f"{GREEN}MCP server '{ns.name}' removed.{RESET}")
+            return 0
+        print(f"{RED}MCP server '{ns.name}' not found.{RESET}")
+        return 1
+
+    return 0
 
 
 def _terminal_width() -> int:
@@ -1226,9 +1396,16 @@ async def _remote_main(args: argparse.Namespace) -> None:
                             _print_system(f"Memory error: {exc}")
                         continue
 
-                    elif cmd == "mcp":
-                        _print_system("MCP servers run on the server — not visible from remote CLI.")
-                        _print_system(f"Check server logs: docker compose logs daap")
+                    elif cmd == "mcp" or cmd.startswith("mcp "):
+                        mcp_parts = shlex.split(user_input.strip())[1:]
+                        mcp_sub = mcp_parts[0] if mcp_parts else ""
+                        if mcp_sub in ("add", "remove", "list"):
+                            _mcp_cli([mcp_sub] + mcp_parts[1:])
+                            if mcp_sub == "add":
+                                _print_system("Restart the DAAP server to connect the new server.")
+                        else:
+                            _print_system("MCP servers run on the server — not visible from remote CLI.")
+                            _print_system("Configured: /mcp list  |  Add: /mcp add <name> --url <url>  |  Remove: /mcp remove <name>")
                         continue
 
                     elif cmd == "skills" or cmd.startswith("skill"):
@@ -1427,17 +1604,31 @@ async def main(args: argparse.Namespace | None = None):
                 _print_system("Conversation history cleared.")
                 continue
 
-            if cmd == "mcp":
-                if mcp_manager:
-                    connected = mcp_manager.list_connected()
-                    tools = await mcp_manager.list_all_tools()
-                    _print_system(f"Connected MCP servers: {', '.join(connected) or 'none'}")
-                    _print_system(f"Available tools ({len(tools)} total):")
-                    for t in tools:
-                        desc = (t.get("description") or "").splitlines()[0][:60]
-                        print(f"  {t['name']}: {desc}")
+            if cmd == "mcp" or cmd.startswith("mcp "):
+                mcp_parts = shlex.split(user_input.strip())[1:]  # drop "/mcp"
+                mcp_sub = mcp_parts[0] if mcp_parts else "list-connected"
+
+                if mcp_sub == "add" and len(mcp_parts) >= 2:
+                    # /mcp add <name> --url <url> | --command <cmd> [--args ...] [--env KEY=VAL ...]
+                    _mcp_cli(["add"] + mcp_parts[1:])
+                    _print_system("Restart DAAP to connect the new server.")
+                elif mcp_sub == "remove" and len(mcp_parts) >= 2:
+                    _mcp_cli(["remove"] + mcp_parts[1:])
+                elif mcp_sub == "list":
+                    _mcp_cli(["list"])
                 else:
-                    _print_system("No MCP servers connected. Configure servers in ~/.daap/mcpx.json")
+                    # Default: show runtime-connected servers
+                    if mcp_manager:
+                        connected = mcp_manager.list_connected()
+                        tools = await mcp_manager.list_all_tools()
+                        _print_system(f"Connected MCP servers: {', '.join(connected) or 'none'}")
+                        _print_system(f"Available tools ({len(tools)} total):")
+                        for t in tools:
+                            desc = (t.get("description") or "").splitlines()[0][:60]
+                            print(f"  {t['name']}: {desc}")
+                    else:
+                        _print_system("No MCP servers connected.")
+                    _print_system("Configured: /mcp list  |  Add: /mcp add <name> --url <url>  |  Remove: /mcp remove <name>")
                 continue
 
             if cmd.startswith("skill ") or cmd == "skill":
@@ -1697,6 +1888,9 @@ async def main(args: argparse.Namespace | None = None):
 
 
 if __name__ == "__main__":
+    if len(sys.argv) > 1 and sys.argv[1] == "mcp":
+        sys.exit(_mcp_cli(sys.argv[2:]))
+
     _args = _parse_args()
     _server_file = pathlib.Path.home() / ".daap" / "server"
     _use_remote = bool(_args.api_url) or _server_file.exists()
