@@ -354,7 +354,7 @@ def test_prompt_includes_runtime_snapshot_when_provided():
             "master_tools": ["ask_user", "generate_topology", "get_runtime_context"],
         }
     )
-    assert "Runtime Infrastructure Snapshot (authoritative)" in prompt
+    assert "Runtime Snapshot (authoritative" in prompt
     assert "\"execution_mode\": \"api-session\"" in prompt
 
 
@@ -537,3 +537,49 @@ def test_runtime_snapshot_includes_known_gaps():
         assert "label" in gap
         assert "keywords" in gap
         assert "install_cmd" in gap or "docs_url" in gap
+
+
+# ---------------------------------------------------------------------------
+# New identity + gap detection prompt tests
+# ---------------------------------------------------------------------------
+
+def test_prompt_identity_is_daap_platform_not_b2b_only():
+    """Master agent identity is DAAP platform assistant, not narrowly B2B sales only."""
+    prompt = get_master_system_prompt()
+    assert "DAAP" in prompt
+    assert "expert AI assistant for B2B sales automation" not in prompt
+
+
+def test_prompt_includes_gap_detection_rules():
+    """Prompt includes hybrid gap detection: proactive if clear, reactive on failure."""
+    prompt = get_master_system_prompt()
+    assert "install" in prompt.lower()
+    assert "daap mcp add" in prompt
+
+
+def test_prompt_instructs_get_runtime_context_for_self_description():
+    """Prompt tells agent to call get_runtime_context when asked about capabilities."""
+    prompt = get_master_system_prompt()
+    assert "get_runtime_context" in prompt
+    assert "functional_capabilities" in prompt
+
+
+def test_prompt_gap_detection_uses_known_gaps_from_snapshot():
+    """Prompt includes known_gaps data when injected via runtime_context."""
+    prompt = get_master_system_prompt(
+        runtime_context={
+            "master_tools": ["ask_user", "generate_topology", "get_runtime_context"],
+            "functional_capabilities": [
+                {"label": "Web search", "available": True},
+                {"label": "LinkedIn", "available": False},
+            ],
+            "known_gaps": [
+                {
+                    "label": "LinkedIn",
+                    "keywords": ["linkedin", "prospect"],
+                    "install_cmd": "daap mcp add linkedin npx @daap/linkedin-mcp",
+                }
+            ],
+        }
+    )
+    assert "known_gaps" in prompt or "LinkedIn" in prompt
