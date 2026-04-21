@@ -155,6 +155,7 @@ class SessionStore:
                      execution_result, is_executing)
                 VALUES (?,?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(session_id) DO UPDATE SET
+                    user_id                  = excluded.user_id,
                     updated_at               = excluded.updated_at,
                     conversation             = excluded.conversation,
                     pending_topology         = excluded.pending_topology,

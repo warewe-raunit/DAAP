@@ -1103,8 +1103,7 @@ async def create_session(
     subagent_powerful_model: str | None = None,
 ):
     """Create a new session and optionally set master/subagent model selection."""
-    session = session_manager.create_session()
-    session.user_id = user_id
+    session = session_manager.create_session(user_id=user_id)
     session.master_operator_config = _build_master_operator_config(master_model)
     session.subagent_operator_config = _build_subagent_operator_config(
         subagent_model,
