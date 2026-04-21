@@ -7,6 +7,7 @@ so callers don't need to know about Mem0 internals or scopes.
 
 import logging
 from daap.memory import reader, writer
+from daap.memory.observability import set_memory_status
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +26,9 @@ class DaapMemory:
         self.available = reader.memory_is_available()
         if not self.available:
             logger.warning("Memory unavailable — operating in degraded mode")
+            set_memory_status(False, "degraded mode")
+        else:
+            set_memory_status(True, "ready")
 
     # ========================================================================
     # Reads (blocking, fast)

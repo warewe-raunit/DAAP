@@ -191,6 +191,7 @@ def test_both_tools_registered_in_toolkit():
     assert "generate_topology" in registered
     assert "ask_user" in registered
     assert "register_skill" in registered
+    assert "get_runtime_context" in registered
 
 
 def test_create_master_toolkit_applies_master_skills(monkeypatch):
@@ -343,6 +344,26 @@ def test_prompt_includes_skill_registration_hint():
     prompt = get_master_system_prompt()
     assert "register_skill" in prompt
     assert "skill directory" in prompt.lower()
+
+
+def test_prompt_includes_runtime_snapshot_when_provided():
+    """System prompt includes authoritative runtime snapshot when provided."""
+    prompt = get_master_system_prompt(
+        runtime_context={
+            "execution_mode": "api-session",
+            "master_tools": ["ask_user", "generate_topology", "get_runtime_context"],
+        }
+    )
+    assert "Runtime Infrastructure Snapshot (authoritative)" in prompt
+    assert "\"execution_mode\": \"api-session\"" in prompt
+
+
+def test_prompt_disables_execute_claims_when_execution_tool_missing():
+    """Prompt avoids forced execute flow if execute_pending_topology is unavailable."""
+    prompt = get_master_system_prompt(
+        runtime_context={"master_tools": ["ask_user", "generate_topology"]},
+    )
+    assert "Do NOT claim you executed anything" in prompt
 
 
 def test_prompt_enforces_action_or_final_output():

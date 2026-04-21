@@ -15,6 +15,7 @@ from agentscope.message import Msg
 from agentscope.model import OpenAIChatModel
 
 from daap.executor.tracked_model import TrackedOpenAIChatModel
+from daap.master.runtime import build_master_runtime_snapshot
 from daap.tools.token_tracker import TokenTracker
 
 from daap.master.prompts import get_master_system_prompt
@@ -100,6 +101,7 @@ def create_master_agent(
     user_context: dict | None = None,
     operator_config: dict | None = None,
     tracker: TokenTracker | None = None,
+    runtime_context: dict | None = None,
 ) -> ReActAgent:
     """
     Create the DAAP master agent with its default module-level toolkit.
@@ -110,12 +112,18 @@ def create_master_agent(
     """
     toolkit = create_master_toolkit()
     model, formatter = _build_model_and_formatter(operator_config, tracker)
+    snapshot = build_master_runtime_snapshot(
+        toolkit,
+        execution_mode="script",
+        extra=runtime_context,
+    )
 
     agent = ReActAgent(
         name="DAAP",
         sys_prompt=get_master_system_prompt(
-            available_tools=get_available_tool_names(),
+            available_tools=get_available_tool_names(include_mcp_placeholders=False),
             user_context=user_context,
+            runtime_context=snapshot,
         ),
         model=model,
         formatter=formatter,
@@ -125,6 +133,7 @@ def create_master_agent(
     )
     # Attach toolkit so parse_turn_result can check per-instance ask_user state
     agent._daap_toolkit = toolkit
+    agent._daap_runtime_context = snapshot
     return agent
 
 
@@ -133,6 +142,7 @@ def create_master_agent_with_toolkit(
     user_context: dict | None = None,
     operator_config: dict | None = None,
     tracker: TokenTracker | None = None,
+    runtime_context: dict | None = None,
 ) -> ReActAgent:
     """
     Create master agent with an externally provided (session-scoped) toolkit.
@@ -141,12 +151,18 @@ def create_master_agent_with_toolkit(
     tracker: optional TokenTracker for recording token usage.
     """
     model, formatter = _build_model_and_formatter(operator_config, tracker)
+    snapshot = build_master_runtime_snapshot(
+        toolkit,
+        execution_mode="api-session",
+        extra=runtime_context,
+    )
 
-    return ReActAgent(
+    agent = ReActAgent(
         name="DAAP",
         sys_prompt=get_master_system_prompt(
-            available_tools=get_available_tool_names(),
+            available_tools=get_available_tool_names(include_mcp_placeholders=False),
             user_context=user_context,
+            runtime_context=snapshot,
         ),
         model=model,
         formatter=formatter,
@@ -154,6 +170,9 @@ def create_master_agent_with_toolkit(
         toolkit=toolkit,
         max_iters=15,
     )
+    agent._daap_toolkit = toolkit
+    agent._daap_runtime_context = snapshot
+    return agent
 
 
 # ---------------------------------------------------------------------------
@@ -176,8 +195,9 @@ def parse_turn_result(response_msg: Msg, master: ReActAgent) -> MasterAgentTurnR
     )
 
     toolkit = getattr(master, "_daap_toolkit", None)
-    pending_qs = toolkit.get_pending_questions() if toolkit is not None else None
-    if pending_qs is not None:
+    get_pending = getattr(toolkit, "get_pending_questions", None)
+    pending_qs = get_pending() if callable(get_pending) else None
+    if isinstance(pending_qs, list) and pending_qs:
         return MasterAgentTurnResult(
             response_text=text,
             has_topology=False,

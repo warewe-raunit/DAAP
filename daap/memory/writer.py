@@ -9,6 +9,7 @@ import asyncio
 import logging
 
 from daap.memory.config import get_memory_client
+from daap.memory.observability import record_memory_error, record_memory_event
 from daap.memory.scopes import profile_scope, master_scope, agent_diary_scope
 from daap.memory.extractors import (
     extract_profile_from_conversation,
@@ -43,8 +44,11 @@ async def write_profile_async(
                 metadata={"source": "initial_conversation"},
             )
         )
+        record_memory_event("write_profile", True)
     except Exception as e:
         logger.warning(f"write_profile_async failed for user {user_id}: {e}")
+        record_memory_error("write_profile", e)
+        record_memory_event("write_profile", False)
 
 
 async def write_run_summary_async(
@@ -78,8 +82,11 @@ async def write_run_summary_async(
                 },
             )
         )
+        record_memory_event("write_run_summary", True)
     except Exception as e:
         logger.warning(f"write_run_summary_async failed for user {user_id}: {e}")
+        record_memory_error("write_run_summary", e)
+        record_memory_event("write_run_summary", False)
 
 
 async def write_agent_diary_async(
@@ -114,8 +121,11 @@ async def write_agent_diary_async(
                 },
             )
         )
+        record_memory_event("write_agent_diary", True)
     except Exception as e:
         logger.warning(f"write_agent_diary_async failed: {e}")
+        record_memory_error("write_agent_diary", e)
+        record_memory_event("write_agent_diary", False)
 
 
 async def write_correction_async(
@@ -147,8 +157,11 @@ async def write_correction_async(
                 },
             )
         )
+        record_memory_event("write_correction", True)
     except Exception as e:
         logger.warning(f"write_correction_async failed for user {user_id}: {e}")
+        record_memory_error("write_correction", e)
+        record_memory_event("write_correction", False)
 
 
 # ============================================================================
@@ -184,7 +197,9 @@ def write_run_to_memory(
             text += f" Error: {execution_result.error}"
         memory.store_run_result(user_id, text)
     except Exception as e:
-        logger.debug("write_run_to_memory skipped: %s", e)
+        logger.warning("write_run_to_memory failed: %s", e)
+        record_memory_error("write_run_to_memory", e)
+        record_memory_event("write_run_to_memory", False)
 
 
 def write_agent_learnings_from_run(
@@ -222,7 +237,9 @@ def write_agent_learnings_from_run(
             )
             memory.store_agent_learning(normalized, learning)
         except Exception as e:
-            logger.debug("write_agent_learnings_from_run skipped for %s: %s", nr.node_id, e)
+            logger.warning("write_agent_learnings_from_run failed for %s: %s", nr.node_id, e)
+            record_memory_error("write_agent_learnings_from_run", e)
+            record_memory_event("write_agent_learnings_from_run", False)
 
 
 # ============================================================================
@@ -242,6 +259,9 @@ def fire_and_forget(coro):
             asyncio.create_task(coro)
         else:
             coro.close()
-            logger.debug("No running event loop — memory write skipped")
+            logger.warning("No running event loop — memory write skipped")
+            record_memory_event("fire_and_forget", False)
     except Exception as e:
         logger.warning(f"fire_and_forget failed: {e}")
+        record_memory_error("fire_and_forget", e)
+        record_memory_event("fire_and_forget", False)

@@ -23,6 +23,7 @@ from daap.api.topology_routes import (
 )
 import daap.api.routes as routes_module
 from daap.feedback.store import FeedbackStore
+from daap.optimizer.store import BanditStore
 from daap.topology.store import TopologyStore
 
 
@@ -43,6 +44,7 @@ def reset_globals(tmp_path):
     routes_module.session_manager = SessionManager()
     routes_module.feedback_store = FeedbackStore(db_path=str(tmp_path / "test.db"))
     routes_module.topology_store = TopologyStore(db_path=str(tmp_path / "topology.db"))
+    routes_module.bandit_store = BanditStore(db_path=str(tmp_path / "optimizer.db"))
     set_topology_store(routes_module.topology_store)
     set_topology_session_manager(routes_module.session_manager)
     yield
@@ -71,6 +73,16 @@ def test_health_endpoint(client):
     resp = client.get("/health")
     assert resp.status_code == 200
     assert resp.json() == {"status": "ok"}
+
+
+def test_memory_status_endpoint(client):
+    """GET /api/v1/memory/status returns observable memory state."""
+    resp = client.get("/api/v1/memory/status")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "available" in data
+    assert "reason" in data
+    assert "operations" in data
 
 
 def test_create_session(client):
@@ -289,6 +301,7 @@ def test_session_scoped_toolkit_has_core_tools():
     assert "ask_user" in registered
     assert "register_skill" in registered
     assert "get_execution_status" in registered
+    assert "get_runtime_context" in registered
 
 
 def test_session_scoped_toolkit_applies_master_skills(monkeypatch):

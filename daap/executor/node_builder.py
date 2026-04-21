@@ -12,6 +12,7 @@ import logging
 import os
 import re
 from dataclasses import dataclass
+from datetime import datetime
 
 from agentscope.agent import ReActAgent
 from agentscope.formatter import OpenAIChatFormatter
@@ -121,10 +122,13 @@ async def build_node(
     3. Create ReActAgent (react or single-shot mode)
     4. Return BuiltNode
     """
-    # 1. Optionally enrich system prompt with agent diary
-    from daap.memory.reader import load_agent_context_for_node
+    # 1. Inject current date so nodes generate accurate search queries/timestamps.
+    #    Matches the same pattern used in the master agent system prompt.
+    today = datetime.now().strftime("%Y-%m-%d")
+    system_prompt = f"Today's date: {today}\n\n{resolved_node.system_prompt}"
 
-    system_prompt = resolved_node.system_prompt
+    # Optionally enrich system prompt with agent diary
+    from daap.memory.reader import load_agent_context_for_node
     if daap_memory and user_id:
         try:
             # client.DaapMemory interface (load_agent_context_for_node)

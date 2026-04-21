@@ -111,6 +111,31 @@ async def _run_agent_with_question_pump(
     try:
         while not agent_task.done():
             if session.pending_questions is not None:
+                # If the agent just generated a topology in this same turn,
+                # send the plan spec FIRST so the user sees what they are
+                # approving before the approval question appears.
+                if session.topology_just_generated:
+                    session.topology_just_generated = False
+                    est = session.pending_estimate or {}
+                    topo = session.pending_topology or {}
+                    raw_nodes = [n for n in topo.get("nodes", []) if isinstance(n, dict)]
+                    node_parts = []
+                    for n in raw_nodes:
+                        nid = n.get("node_id", "")
+                        instances = n.get("instance_config", {}).get("parallel_instances", 1)
+                        node_parts.append(f"{nid} ×{instances}" if instances > 1 else nid)
+                    tracker = getattr(session, "token_tracker", None)
+                    usage_snapshot = tracker.to_dict() if tracker else {}
+                    await websocket.send_json({
+                        "type": "plan",
+                        "summary": f"{len(node_parts)} node(s): {', '.join(node_parts)}",
+                        "topology": topo,
+                        "cost_usd": est.get("total_cost_usd", 0),
+                        "latency_seconds": est.get("total_latency_seconds", 0),
+                        "min_cost_usd": est.get("min_viable_cost_usd", 0),
+                        "usage": usage_snapshot,
+                    })
+
                 # Agent is paused waiting for user input — send once, then loop
                 # until we receive a valid "answer" message (ignore anything else
                 # to prevent resending the same questions on unexpected messages).

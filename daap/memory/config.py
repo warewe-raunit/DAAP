@@ -16,6 +16,12 @@ Required env vars:
 import os
 from typing import Literal
 
+from daap.memory.observability import (
+    record_memory_error,
+    record_memory_event,
+    set_memory_status,
+)
+
 
 # ============================================================================
 # Configuration builders
@@ -85,8 +91,17 @@ def get_memory_client(mode: Literal["production", "testing"] = "production"):
     """
     global _memory_client
     if _memory_client is None:
-        from mem0 import Memory
-        _memory_client = Memory.from_config(build_config(mode))
+        try:
+            from mem0 import Memory
+
+            _memory_client = Memory.from_config(build_config(mode))
+            set_memory_status(True, f"initialized ({mode})")
+            record_memory_event("init_client", True)
+        except Exception as exc:
+            set_memory_status(False, f"init failed ({mode})")
+            record_memory_error("init_client", exc)
+            record_memory_event("init_client", False)
+            raise
     return _memory_client
 
 
@@ -108,9 +123,18 @@ def check_memory_available() -> tuple[bool, str]:
     Used by startup to decide whether to enable memory features.
     """
     if not os.environ.get("OPENROUTER_API_KEY"):
-        return False, "OPENROUTER_API_KEY not set (required for embeddings and extraction LLM)"
+        reason = "OPENROUTER_API_KEY not set (required for embeddings and extraction LLM)"
+        set_memory_status(False, reason)
+        record_memory_event("health_check", False)
+        return False, reason
     try:
         get_memory_client("production")
+        set_memory_status(True, "ok")
+        record_memory_event("health_check", True)
         return True, "ok"
     except Exception as e:
-        return False, f"Mem0 init failed: {e}"
+        reason = f"Mem0 init failed: {e}"
+        set_memory_status(False, reason)
+        record_memory_error("health_check", e)
+        record_memory_event("health_check", False)
+        return False, reason

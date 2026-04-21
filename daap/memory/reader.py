@@ -10,6 +10,7 @@ All reads are defensive: return empty on failure, never crash.
 import logging
 
 from daap.memory.config import get_memory_client, check_memory_available
+from daap.memory.observability import record_memory_error, record_memory_event
 from daap.memory.scopes import profile_scope, master_scope, agent_diary_scope
 
 logger = logging.getLogger(__name__)
@@ -28,9 +29,12 @@ def load_user_profile(user_id: str, limit: int = 10) -> list[str]:
             **profile_scope(user_id),
             limit=limit,
         )
+        record_memory_event("load_user_profile", True)
         return [m["memory"] for m in result.get("results", [])]
     except Exception as e:
         logger.warning(f"load_user_profile failed for user {user_id}: {e}")
+        record_memory_error("load_user_profile", e)
+        record_memory_event("load_user_profile", False)
         return []
 
 
@@ -47,9 +51,12 @@ def search_user_profile(user_id: str, query: str, limit: int = 5) -> list[str]:
             **profile_scope(user_id),
             limit=limit,
         )
+        record_memory_event("search_user_profile", True)
         return [m["memory"] for m in result.get("results", [])]
     except Exception as e:
         logger.warning(f"search_user_profile failed: {e}")
+        record_memory_error("search_user_profile", e)
+        record_memory_event("search_user_profile", False)
         return []
 
 
@@ -70,9 +77,12 @@ def load_master_history(user_id: str, query: str, limit: int = 5) -> list[str]:
             **master_scope(user_id),
             limit=limit,
         )
+        record_memory_event("load_master_history", True)
         return [m["memory"] for m in result.get("results", [])]
     except Exception as e:
         logger.warning(f"load_master_history failed: {e}")
+        record_memory_error("load_master_history", e)
+        record_memory_event("load_master_history", False)
         return []
 
 
@@ -102,9 +112,12 @@ def load_agent_diary(
         else:
             result = client.get_all(limit=limit, **scope)
 
+        record_memory_event("load_agent_diary", True)
         return [m["memory"] for m in result.get("results", [])]
     except Exception as e:
         logger.warning(f"load_agent_diary failed: {e}")
+        record_memory_error("load_agent_diary", e)
+        record_memory_event("load_agent_diary", False)
         return []
 
 

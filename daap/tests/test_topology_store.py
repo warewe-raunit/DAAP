@@ -305,3 +305,18 @@ def test_purge_leaves_recently_deleted(store):
     store.delete_topology("topo-abc12345", ttl_days=30)
     count = store.purge_expired()
     assert count == 0
+
+
+def test_purge_old_runs_removes_expired_rows(store):
+    store.save_topology(SAMPLE_SPEC, user_id="user-1")
+    run = store.save_run("topo-abc12345", 1, "user-1", SAMPLE_RESULT)
+    with sqlite3.connect(store.db_path) as conn:
+        conn.execute(
+            "UPDATE topology_runs SET ran_at = ? WHERE run_id = ?",
+            (time.time() - (5 * 86400), run.run_id),
+        )
+        conn.commit()
+
+    purged = store.purge_old_runs(retention_days=1)
+    assert purged == 1
+    assert store.get_runs("topo-abc12345") == []

@@ -4,7 +4,9 @@ DAAP Feedback Store Tests — pytest suite for feedback/store.py and feedback/co
 
 import json
 import os
+import sqlite3
 import tempfile
+import time
 from pathlib import Path
 
 import pytest
@@ -153,6 +155,21 @@ def test_db_persists_across_instances(tmp_path):
     runs = store2.get_runs_for_session("sess-persist")
     assert len(runs) == 1
     assert runs[0]["session_id"] == "sess-persist"
+
+
+def test_purge_expired_removes_old_rows(tmp_path):
+    store = make_store(tmp_path)
+    store.store_run("sess-old", SAMPLE_TOPOLOGY, SAMPLE_RESULT)
+    with sqlite3.connect(store.db_path) as conn:
+        conn.execute(
+            "UPDATE runs SET timestamp = ? WHERE session_id = ?",
+            (time.time() - (3 * 86400), "sess-old"),
+        )
+        conn.commit()
+
+    purged = store.purge_expired(retention_days=1)
+    assert purged == 1
+    assert store.get_runs_for_session("sess-old") == []
 
 
 # ---------------------------------------------------------------------------

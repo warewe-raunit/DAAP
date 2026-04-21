@@ -1,8 +1,9 @@
 """
 DAAP Tool Registry — maps abstract tool names to concrete async tool functions.
 
-web_search: DuckDuckGo (free, no API key required)
-web_fetch:  httpx + BeautifulSoup (text extraction from HTML)
+web_search:  DuckDuckGo (free, no API key required)
+web_fetch:   Jina Reader primary (JS-capable), httpx+BS4 fallback
+deep_crawl:  Crawl4AI multi-page extraction (optional dep)
 read_file, write_file, code_execution: local ops
 
 This is the SINGLE SOURCE OF TRUTH for available tools.
@@ -89,11 +90,12 @@ async def web_search(query: str, max_results: int = 8) -> ToolResponse:
 
 
 # ---------------------------------------------------------------------------
-# web_fetch — httpx + BeautifulSoup
+# web_fetch — Jina Reader primary, httpx + BeautifulSoup fallback
 # ---------------------------------------------------------------------------
 
-_FETCH_TIMEOUT = 15  # seconds
-_MAX_CONTENT_CHARS = 8000
+_FETCH_TIMEOUT = 20  # seconds
+_MAX_CONTENT_CHARS = 20_000
+_JINA_BASE = "https://r.jina.ai/"
 
 
 def _html_to_text(html: str) -> str:
@@ -110,19 +112,64 @@ def _html_to_text(html: str) -> str:
     return "\n".join(lines)
 
 
+async def _fetch_via_jina(url: str) -> str | None:
+    """Try Jina Reader; return clean markdown or None on failure."""
+    import os
+    headers = {
+        "User-Agent": "Mozilla/5.0 (compatible; DAAP/1.0)",
+        "X-Return-Format": "markdown",
+        "X-Timeout": str(_FETCH_TIMEOUT),
+    }
+    api_key = os.environ.get("JINA_API_KEY")
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    try:
+        async with httpx.AsyncClient(
+            follow_redirects=True,
+            timeout=_FETCH_TIMEOUT + 5,
+            verify=False,
+        ) as client:
+            resp = await client.get(f"{_JINA_BASE}{url}", headers=headers)
+            if resp.status_code == 200 and resp.text.strip():
+                return resp.text
+    except Exception:
+        pass
+    return None
+
+
+async def _fetch_via_httpx(url: str) -> str:
+    """Raw httpx fetch with BeautifulSoup text extraction."""
+    async with httpx.AsyncClient(
+        follow_redirects=True,
+        timeout=_FETCH_TIMEOUT,
+        verify=False,
+        headers={"User-Agent": "Mozilla/5.0 (compatible; DAAP/1.0)"},
+    ) as client:
+        response = await client.get(url)
+        response.raise_for_status()
+
+    content_type = response.headers.get("content-type", "")
+    if "html" in content_type:
+        return _html_to_text(response.text)
+    return response.text
+
+
 async def web_fetch(url: str) -> ToolResponse:
     """Fetch the full readable text content of a web page.
 
     USE FOR: reading a specific URL found via WebSearch — scraping a Reddit
-    thread, reading a blog post, extracting data from a landing page.
+    thread, reading a blog post, extracting data from a landing page,
+    reading JavaScript-heavy sites, fetching PDFs.
 
     DO NOT USE FOR: searching (use WebSearch instead). Do not guess URLs;
     only fetch URLs you have already retrieved from WebSearch or the user.
+    For crawling multiple linked pages use DeepCrawl instead.
 
     ARGS:
         url: full URL starting with http:// or https://
 
-    RETURNS: plain text of the page, stripped of HTML, truncated to 8000 chars.
+    RETURNS: clean markdown text of the page, truncated to 20000 chars.
+             Uses Jina Reader for JS-rendered pages; falls back to direct fetch.
     """
     if not url.startswith(("http://", "https://")):
         return ToolResponse(content=[TextBlock(
@@ -131,27 +178,21 @@ async def web_fetch(url: str) -> ToolResponse:
         )])
 
     try:
-        async with httpx.AsyncClient(
-            follow_redirects=True,
-            timeout=_FETCH_TIMEOUT,
-            verify=False,  # Windows cert store issues; acceptable for scraping
-            headers={"User-Agent": "Mozilla/5.0 (compatible; DAAP/1.0)"},
-        ) as client:
-            response = await client.get(url)
-            response.raise_for_status()
+        # Primary: Jina Reader handles JS-rendered pages, paywalls, PDFs
+        text = await _fetch_via_jina(url)
+        source = "Jina Reader"
 
-        content_type = response.headers.get("content-type", "")
-        if "html" in content_type:
-            text = _html_to_text(response.text)
-        else:
-            text = response.text
+        if not text:
+            # Fallback: direct httpx + BeautifulSoup
+            text = await _fetch_via_httpx(url)
+            source = "direct fetch"
 
         if len(text) > _MAX_CONTENT_CHARS:
             text = text[:_MAX_CONTENT_CHARS] + f"\n\n[Truncated — {len(text)} total chars]"
 
         return ToolResponse(content=[TextBlock(
             type="text",
-            text=f"Content from {url}:\n\n{text}",
+            text=f"Content from {url} (via {source}):\n\n{text}",
         )])
 
     except httpx.HTTPStatusError as exc:
@@ -163,6 +204,126 @@ async def web_fetch(url: str) -> ToolResponse:
         return ToolResponse(content=[TextBlock(
             type="text",
             text=f"Fetch failed for {url}: {exc}",
+        )])
+
+
+# ---------------------------------------------------------------------------
+# deep_crawl — Crawl4AI multi-page extraction
+# ---------------------------------------------------------------------------
+
+_DEEP_CRAWL_MAX_PAGES = 10
+_DEEP_CRAWL_MAX_CHARS = 40_000
+
+
+async def deep_crawl(start_url: str, max_pages: int = 5, query: str = "") -> ToolResponse:
+    """Crawl a website and extract clean content from multiple linked pages.
+
+    USE FOR: extracting structured content from documentation sites, company
+    websites, news sites, or any multi-page resource where WebFetch covers
+    only one page. Handles JavaScript-rendered pages, shadow DOM, anti-bot
+    measures, and consent popups automatically.
+
+    DO NOT USE FOR: single-page reads (use WebFetch). Do not use for general
+    search (use WebSearch). Only call with URLs you have from WebSearch or the user.
+
+    REQUIRES: crawl4ai installed (`pip install crawl4ai && crawl4ai-setup`).
+    Falls back gracefully with install instructions if not available.
+
+    ARGS:
+        start_url: root URL to begin crawling (http:// or https://)
+        max_pages: max pages to crawl from start_url (default 5, max 10)
+        query:     optional topic hint to filter crawled content (e.g. "pricing")
+
+    RETURNS: LLM-ready markdown from all crawled pages, separated by dividers.
+    """
+    if not start_url.startswith(("http://", "https://")):
+        return ToolResponse(content=[TextBlock(
+            type="text",
+            text=f"Invalid URL (must start with http:// or https://): {start_url}",
+        )])
+
+    max_pages = min(max_pages, _DEEP_CRAWL_MAX_PAGES)
+
+    try:
+        from crawl4ai import AsyncWebCrawler, CrawlerRunConfig  # type: ignore
+    except ImportError:
+        return ToolResponse(content=[TextBlock(
+            type="text",
+            text=(
+                "crawl4ai not installed. Install it with:\n"
+                "  pip install crawl4ai\n"
+                "  crawl4ai-setup\n\n"
+                "Falling back to WebFetch for single-page extraction."
+            ),
+        )])
+
+    try:
+        sections: list[str] = []
+
+        async with AsyncWebCrawler() as crawler:
+            # Single-page mode — one reliable crawl of start_url
+            config = CrawlerRunConfig(
+                word_count_threshold=10,
+                exclude_external_links=False,
+                remove_overlay_elements=True,
+                process_iframes=True,
+            )
+            result = await crawler.arun(url=start_url, config=config)
+            if result.success and result.markdown:
+                md = result.markdown.strip()
+                if query:
+                    # Filter to paragraphs/sections mentioning the query
+                    lines = md.splitlines()
+                    relevant = [
+                        ln for ln in lines
+                        if query.lower() in ln.lower() or ln.startswith("#")
+                    ]
+                    md = "\n".join(relevant) if relevant else md
+                sections.append(f"## {start_url}\n\n{md}")
+
+            # Follow internal links up to max_pages - 1
+            if max_pages > 1 and result.success and result.links:
+                internal = [
+                    lnk.get("href", "") for lnk in result.links.get("internal", [])
+                    if lnk.get("href", "").startswith(("http://", "https://"))
+                ][:max_pages - 1]
+
+                for link_url in internal:
+                    try:
+                        sub = await crawler.arun(url=link_url, config=config)
+                        if sub.success and sub.markdown:
+                            md = sub.markdown.strip()
+                            if query:
+                                lines = md.splitlines()
+                                relevant = [
+                                    ln for ln in lines
+                                    if query.lower() in ln.lower() or ln.startswith("#")
+                                ]
+                                md = "\n".join(relevant) if relevant else md
+                            sections.append(f"## {link_url}\n\n{md}")
+                    except Exception as link_exc:
+                        logger.debug("deep_crawl sub-page failed %s: %s", link_url, link_exc)
+
+        if not sections:
+            return ToolResponse(content=[TextBlock(
+                type="text",
+                text=f"No content extracted from {start_url}. Try WebFetch for this URL instead.",
+            )])
+
+        combined = "\n\n---\n\n".join(sections)
+        if len(combined) > _DEEP_CRAWL_MAX_CHARS:
+            combined = combined[:_DEEP_CRAWL_MAX_CHARS] + f"\n\n[Truncated — {len(combined)} total chars]"
+
+        page_word = "page" if len(sections) == 1 else "pages"
+        return ToolResponse(content=[TextBlock(
+            type="text",
+            text=f"Deep crawl of {start_url} ({len(sections)} {page_word}):\n\n{combined}",
+        )])
+
+    except Exception as exc:
+        return ToolResponse(content=[TextBlock(
+            type="text",
+            text=f"Deep crawl failed for {start_url}: {exc}",
         )])
 
 
@@ -276,6 +437,7 @@ async def code_execution(code: str, language: str = "python") -> ToolResponse:
 _TOOL_REGISTRY: dict[str, callable] = {
     "agentscope.tools.WebSearch":     web_search,
     "agentscope.tools.WebFetch":      web_fetch,
+    "agentscope.tools.DeepCrawl":     deep_crawl,
     "agentscope.tools.ReadFile":      read_file,
     "agentscope.tools.WriteFile":     write_file,
     "agentscope.tools.CodeExecution": code_execution,
@@ -284,6 +446,7 @@ _TOOL_REGISTRY: dict[str, callable] = {
 _ABSTRACT_TO_RESOLVED: dict[str, str] = {
     "WebSearch":     "agentscope.tools.WebSearch",
     "WebFetch":      "agentscope.tools.WebFetch",
+    "DeepCrawl":     "agentscope.tools.DeepCrawl",
     "ReadFile":      "agentscope.tools.ReadFile",
     "WriteFile":     "agentscope.tools.WriteFile",
     "CodeExecution": "agentscope.tools.CodeExecution",
@@ -374,6 +537,7 @@ def get_tool_descriptions() -> str:
     _BUILTIN_FUNCS = {
         "WebSearch":     web_search,
         "WebFetch":      web_fetch,
+        "DeepCrawl":     deep_crawl,
         "ReadFile":      read_file,
         "WriteFile":     write_file,
         "CodeExecution": code_execution,
@@ -385,9 +549,11 @@ def get_tool_descriptions() -> str:
     return "\n\n".join(lines)
 
 
-def get_available_tool_names() -> set[str]:
-    """Returns abstract tool names for the validator and master agent prompt."""
-    names = set(_ABSTRACT_TO_RESOLVED.keys()) | set(_MCP_PLACEHOLDER_TOOLS)
+def get_available_tool_names(include_mcp_placeholders: bool = True) -> set[str]:
+    """Returns abstract tool names for validation and master-agent prompting."""
+    names = set(_ABSTRACT_TO_RESOLVED.keys())
+    if include_mcp_placeholders:
+        names.update(_MCP_PLACEHOLDER_TOOLS)
 
     mcp_manager = _get_mcp_manager_safe()
     if mcp_manager is not None:

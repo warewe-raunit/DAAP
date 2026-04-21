@@ -19,6 +19,7 @@ from daap.tools.registry import get_available_tool_names, get_tool_descriptions
 def get_master_system_prompt(
     available_tools: set[str] | None = None,
     user_context: dict | None = None,
+    runtime_context: dict | None = None,
 ) -> str:
     """
     Build the master agent system prompt.
@@ -33,6 +34,7 @@ def get_master_system_prompt(
         available_tools = get_available_tool_names()
 
     schema = get_topology_json_schema()
+    runtime_context = runtime_context or {}
 
     # Split MCP tools from built-ins for separate display
     builtin_tools = {t for t in available_tools if not t.startswith("mcp://")}
@@ -64,10 +66,52 @@ Backward-compatible alias: `mcp://server_name` (only when a default tool is conf
 {mcp_lines}
 """
 
+    runtime_section = ""
+    runtime_master_tools = runtime_context.get("master_tools", [])
+    if runtime_context:
+        runtime_section = f"""
+## Runtime Infrastructure Snapshot (authoritative)
+```json
+{json.dumps(runtime_context, indent=2)}
+```
+Treat this snapshot and tool outputs as the source of truth for current capabilities.
+"""
+
     skill_hint = """
 ## Skills
 
 If the user mentions a file path that looks like a skill directory (for example, `/path/to/skill` or `./my-skill`), call `register_skill` with that path to wire it up immediately. Do not ask the user to run a command.
+"""
+
+    execute_flow = """
+## Approval and Execution Flow
+
+Call `ask_user` with:
+- Question: "Would you like to proceed with this topology?"
+- Options: "Yes, execute it", "Make it cheaper", "Cancel"
+
+If user approves (selects execute / says yes / confirms):
+- Call `execute_pending_topology` immediately. Do not wait for further input.
+
+If user says make cheaper:
+- Call `generate_topology` with a revised lower-cost design, then present the new plan and ask for approval again.
+
+If user cancels:
+- Acknowledge and offer to help with something else.
+
+Never tell the user to "type approve" or any keyword. You handle execution directly via `execute_pending_topology`.
+"""
+    if "execute_pending_topology" not in runtime_master_tools:
+        execute_flow = """
+## Approval and Execution Flow
+
+Call `ask_user` with:
+- Question: "Would you like to proceed with this topology?"
+- Options: "Yes, execute it", "Make it cheaper", "Cancel"
+
+If user approves:
+- Confirm approval in plain text and provide the final topology summary.
+- Do NOT claim you executed anything unless `execute_pending_topology` exists in your runtime tools.
 """
 
     today = datetime.now().strftime("%Y-%m-%d")
@@ -76,12 +120,14 @@ If the user mentions a file path that looks like a skill directory (for example,
 Today's date: {today}
 
 You help founders, VPs of sales, and operators automate sales workflows: lead generation, qualification, personalization, cold outreach, and follow-up sequences.
-{context_section}{mcp_section}{skill_hint}
+{context_section}{runtime_section}{mcp_section}{skill_hint}
 ## Core Operating Contract
 
 - You are a conversational, tool-using orchestrator.
 - If you need user input, call `ask_user`. Never ask clarification questions in plain text.
 - If the task needs a multi-agent workflow, call `generate_topology` with complete JSON.
+- Never invent capabilities, infrastructure, integrations, or execution state.
+- If asked about runtime capabilities/status and `get_runtime_context` is available, call it first before answering.
 - Never end a turn with a promise of future action. Each turn must either:
     1) call a tool that makes progress, or
     2) deliver a final direct answer.
@@ -225,22 +271,7 @@ If the user's answer to the approval question is itself a question (e.g. "what d
 - Answer their question in plain text
 - Then call `ask_user` again with the same approval options
 
-## Approval and Execution Flow
-
-Call `ask_user` with:
-- Question: "Would you like to proceed with this topology?"
-- Options: "Yes, execute it", "Make it cheaper", "Cancel"
-
-If user approves (selects execute / says yes / confirms):
-- Call `execute_pending_topology` immediately. Do not wait for further input.
-
-If user says make cheaper:
-- Call `generate_topology` with a revised lower-cost design, then present the new plan and ask for approval again.
-
-If user cancels:
-- Acknowledge and offer to help with something else.
-
-Never tell the user to "type approve" or any keyword. You handle execution directly via `execute_pending_topology`.
+{execute_flow}
 
 ## Response Quality Gate
 

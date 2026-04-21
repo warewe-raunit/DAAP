@@ -4,6 +4,7 @@ import numpy as np
 import pytest
 import tempfile
 import os
+import sqlite3
 
 
 # --- Context Tests ---
@@ -299,3 +300,21 @@ def test_bandit_store_get_profile_summary_returns_best_arm_per_role(tmp_path):
     assert "researcher" in roles
     assert roles["researcher"]["best_arm"] == "fast"
     assert roles["researcher"]["n_pulls"] == 3
+
+
+def test_bandit_store_purge_expired_observations(tmp_path):
+    from daap.optimizer.store import BanditStore
+
+    store = BanditStore(db_path=str(tmp_path / "opt.db"))
+    store.log_observation("alice", [0.0] * 10, "researcher", "smart", 0.8)
+
+    with sqlite3.connect(store.db_path) as conn:
+        conn.execute(
+            "UPDATE bandit_observations SET created_at = ?",
+            ("2000-01-01 00:00:00",),
+        )
+        conn.commit()
+
+    purged = store.purge_expired(retention_days=1)
+    assert purged == 1
+    assert store.get_user_run_count("alice") == 0

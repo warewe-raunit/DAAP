@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 from agentscope.message import TextBlock
 from agentscope.tool import Toolkit, ToolResponse
 
+from daap.master.runtime import build_master_runtime_snapshot
 from daap.spec.estimator import estimate_topology, _format_cost
 from daap.spec.resolver import resolve_topology
 from daap.spec.schema import TopologySpec
@@ -305,9 +306,27 @@ def create_master_toolkit() -> Toolkit:
         if _state["event"] is not None:
             _state["event"].set()
 
+    async def get_runtime_context() -> ToolResponse:
+        """Return current master runtime capabilities and infrastructure snapshot.
+
+        Call this before answering questions like:
+        - what tools/capabilities you currently have
+        - whether memory, MCP, or execution features are available
+        - what infrastructure you are operating with right now
+        """
+        snapshot = build_master_runtime_snapshot(
+            toolkit,
+            execution_mode="script",
+        )
+        return ToolResponse(content=[TextBlock(
+            type="text",
+            text=json.dumps(snapshot, indent=2),
+        )])
+
     toolkit.register_tool_function(generate_topology)
     toolkit.register_tool_function(ask_user)
     toolkit.register_tool_function(register_skill)
+    toolkit.register_tool_function(get_runtime_context)
 
     # Attach state accessors for script-layer coordination (not part of Toolkit API)
     toolkit.get_pending_questions = get_pending_questions
