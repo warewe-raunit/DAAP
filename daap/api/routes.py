@@ -20,6 +20,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, HTTPException, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
 from daap.api.auth import require_api_key, validate_ws_token
@@ -38,6 +39,551 @@ from daap.topology.store import TopologyStore
 from daap.tools.token_tracker import TokenTracker
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Chat UI — single-file HTML served at GET /
+# ---------------------------------------------------------------------------
+
+_CHAT_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DAAP Chat</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    background: #0f1117;
+    color: #e2e8f0;
+    height: 100dvh;
+    display: flex;
+    flex-direction: column;
+  }
+  header {
+    padding: 12px 20px;
+    border-bottom: 1px solid #1e2430;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    background: #141921;
+  }
+  header h1 { font-size: 1rem; font-weight: 600; color: #94a3b8; letter-spacing: 0.05em; }
+  #status-dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: #ef4444; flex-shrink: 0;
+    transition: background 0.3s;
+  }
+  #status-dot.connected { background: #22c55e; }
+  #messages {
+    flex: 1;
+    overflow-y: auto;
+    padding: 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+  .msg {
+    max-width: 720px;
+    padding: 12px 16px;
+    border-radius: 12px;
+    line-height: 1.55;
+    font-size: 0.9rem;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+  .msg.user { background: #1e40af; align-self: flex-end; color: #e0e7ff; border-bottom-right-radius: 3px; }
+  .msg.agent { background: #1e2430; align-self: flex-start; border-bottom-left-radius: 3px; }
+  .msg.error { background: #450a0a; color: #fca5a5; align-self: flex-start; border-left: 3px solid #ef4444; }
+  .msg.system { background: transparent; color: #64748b; align-self: center; font-size: 0.8rem; font-style: italic; }
+
+  /* Plan card */
+  .plan-card {
+    background: #1a2235;
+    border: 1px solid #2d3f5e;
+    border-radius: 12px;
+    padding: 16px;
+    align-self: flex-start;
+    max-width: 560px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .plan-card h3 { font-size: 0.85rem; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.08em; }
+  .plan-card .summary { font-size: 0.9rem; color: #e2e8f0; }
+  .plan-meta { display: flex; gap: 16px; font-size: 0.8rem; color: #64748b; }
+  .plan-actions { display: flex; gap: 8px; }
+  .btn {
+    padding: 7px 16px; border: none; border-radius: 7px;
+    font-size: 0.85rem; font-weight: 500; cursor: pointer;
+    transition: opacity 0.15s;
+  }
+  .btn:hover { opacity: 0.85; }
+  .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+  .btn-approve { background: #16a34a; color: #fff; }
+  .btn-cheaper { background: #1d4ed8; color: #fff; }
+  .btn-cancel  { background: #374151; color: #d1d5db; }
+
+  /* Questions form */
+  .questions-card {
+    background: #1a2235;
+    border: 1px solid #2d3f5e;
+    border-radius: 12px;
+    padding: 16px;
+    align-self: flex-start;
+    max-width: 560px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+  .questions-card h3 { font-size: 0.85rem; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.08em; }
+  .q-item { display: flex; flex-direction: column; gap: 5px; }
+  .q-item label { font-size: 0.85rem; color: #cbd5e1; }
+  .q-item input, .q-item select {
+    background: #0f1117; border: 1px solid #374151; border-radius: 6px;
+    color: #e2e8f0; padding: 7px 10px; font-size: 0.875rem;
+    outline: none;
+  }
+  .q-item input:focus, .q-item select:focus { border-color: #3b82f6; }
+
+  /* Executing indicator */
+  .executing-row {
+    display: flex; align-items: center; gap: 10px;
+    align-self: flex-start; color: #94a3b8; font-size: 0.85rem;
+  }
+  .spinner {
+    width: 16px; height: 16px;
+    border: 2px solid #374151;
+    border-top-color: #3b82f6;
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+    flex-shrink: 0;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* Result card */
+  .result-card {
+    background: #052e16;
+    border: 1px solid #166534;
+    border-radius: 12px;
+    padding: 16px;
+    align-self: flex-start;
+    max-width: 720px;
+  }
+  .result-card h3 { font-size: 0.85rem; color: #4ade80; margin-bottom: 8px; text-transform: uppercase; letter-spacing: 0.08em; }
+  .result-card pre {
+    font-family: "SF Mono", "Fira Code", monospace;
+    font-size: 0.82rem;
+    white-space: pre-wrap;
+    word-break: break-word;
+    color: #bbf7d0;
+  }
+  .result-meta { font-size: 0.78rem; color: #4ade80; margin-top: 8px; opacity: 0.7; }
+
+  /* Bottom bar */
+  #bottom {
+    padding: 14px 20px;
+    border-top: 1px solid #1e2430;
+    background: #141921;
+    display: flex;
+    gap: 10px;
+  }
+  #input {
+    flex: 1;
+    background: #1e2430;
+    border: 1px solid #374151;
+    border-radius: 10px;
+    color: #e2e8f0;
+    padding: 10px 14px;
+    font-size: 0.9rem;
+    resize: none;
+    outline: none;
+    max-height: 160px;
+    line-height: 1.4;
+  }
+  #input:focus { border-color: #3b82f6; }
+  #send-btn {
+    padding: 10px 18px;
+    background: #3b82f6;
+    color: #fff;
+    border: none;
+    border-radius: 10px;
+    font-size: 0.9rem;
+    font-weight: 500;
+    cursor: pointer;
+    align-self: flex-end;
+    transition: background 0.15s;
+  }
+  #send-btn:hover { background: #2563eb; }
+  #send-btn:disabled { background: #374151; cursor: not-allowed; }
+
+  /* Setup overlay */
+  #setup-overlay {
+    position: fixed; inset: 0;
+    background: rgba(0,0,0,0.7);
+    display: flex; align-items: center; justify-content: center;
+    z-index: 100;
+  }
+  #setup-box {
+    background: #141921;
+    border: 1px solid #2d3f5e;
+    border-radius: 16px;
+    padding: 32px;
+    width: 360px;
+    display: flex;
+    flex-direction: column;
+    gap: 18px;
+  }
+  #setup-box h2 { font-size: 1.1rem; color: #e2e8f0; }
+  #setup-box p { font-size: 0.85rem; color: #64748b; }
+  .field { display: flex; flex-direction: column; gap: 6px; }
+  .field label { font-size: 0.85rem; color: #94a3b8; }
+  .field input {
+    background: #0f1117; border: 1px solid #374151; border-radius: 8px;
+    color: #e2e8f0; padding: 9px 12px; font-size: 0.9rem; outline: none;
+  }
+  .field input:focus { border-color: #3b82f6; }
+  #start-btn {
+    padding: 10px; background: #3b82f6; color: #fff;
+    border: none; border-radius: 8px; font-size: 0.95rem;
+    font-weight: 600; cursor: pointer;
+  }
+  #start-btn:hover { background: #2563eb; }
+  #setup-error { color: #fca5a5; font-size: 0.82rem; display: none; }
+</style>
+</head>
+<body>
+
+<div id="setup-overlay">
+  <div id="setup-box">
+    <h2>DAAP Chat</h2>
+    <p>Dynamic Agent Automation Platform</p>
+    <div class="field">
+      <label for="uid-input">Your name / user ID</label>
+      <input id="uid-input" type="text" placeholder="e.g. alice" autocomplete="off">
+    </div>
+    <div class="field" id="key-field" style="display:none">
+      <label for="key-input">API Key</label>
+      <input id="key-input" type="password" placeholder="DAAP_API_KEY">
+    </div>
+    <div id="setup-error"></div>
+    <button id="start-btn">Start chatting</button>
+  </div>
+</div>
+
+<header>
+  <div id="status-dot"></div>
+  <h1>DAAP</h1>
+  <span id="session-label" style="font-size:0.75rem;color:#475569;margin-left:auto"></span>
+</header>
+
+<div id="messages"></div>
+
+<div id="bottom">
+  <textarea id="input" rows="1" placeholder="Describe a task…" disabled></textarea>
+  <button id="send-btn" disabled>Send</button>
+</div>
+
+<script>
+const AUTH_ENABLED = __AUTH_ENABLED__;
+let ws = null;
+let sessionId = null;
+let apiKey = "";
+let pendingPlanEl = null;
+
+// ── Setup overlay ──────────────────────────────────────────────────────────
+const overlay = document.getElementById("setup-overlay");
+const keyField = document.getElementById("key-field");
+if (AUTH_ENABLED) keyField.style.display = "";
+
+document.getElementById("start-btn").addEventListener("click", async () => {
+  const userId = document.getElementById("uid-input").value.trim();
+  if (!userId) { showSetupError("Enter a user ID"); return; }
+  apiKey = document.getElementById("key-input").value.trim();
+  if (AUTH_ENABLED && !apiKey) { showSetupError("Enter the API key"); return; }
+  await startSession(userId);
+});
+
+document.getElementById("uid-input").addEventListener("keydown", e => {
+  if (e.key === "Enter") document.getElementById("start-btn").click();
+});
+
+function showSetupError(msg) {
+  const el = document.getElementById("setup-error");
+  el.textContent = msg;
+  el.style.display = "";
+}
+
+// ── Session + WebSocket ────────────────────────────────────────────────────
+async function startSession(userId) {
+  const btn = document.getElementById("start-btn");
+  btn.disabled = true;
+  btn.textContent = "Connecting…";
+
+  const headers = { "Content-Type": "application/json" };
+  if (apiKey) headers["X-API-Key"] = apiKey;
+
+  const r = await fetch(`/session?user_id=${encodeURIComponent(userId)}`, {
+    method: "POST", headers,
+  });
+
+  if (!r.ok) {
+    const j = await r.json().catch(() => ({}));
+    showSetupError(j.detail || `Error ${r.status}`);
+    btn.disabled = false; btn.textContent = "Start chatting";
+    return;
+  }
+
+  const { session_id } = await r.json();
+  sessionId = session_id;
+  document.getElementById("session-label").textContent = `session: ${session_id.slice(0,8)}…`;
+  overlay.style.display = "none";
+  connectWS();
+}
+
+function connectWS() {
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  const url = `${proto}://${location.host}/ws/${sessionId}${apiKey ? "?token=" + encodeURIComponent(apiKey) : ""}`;
+  ws = new WebSocket(url);
+
+  ws.onopen = () => {
+    document.getElementById("status-dot").classList.add("connected");
+    document.getElementById("input").disabled = false;
+    document.getElementById("send-btn").disabled = false;
+    document.getElementById("input").focus();
+    appendSystem("Connected. Describe a task to get started.");
+  };
+
+  ws.onclose = () => {
+    document.getElementById("status-dot").classList.remove("connected");
+    document.getElementById("input").disabled = true;
+    document.getElementById("send-btn").disabled = true;
+    appendSystem("Disconnected. Refresh to reconnect.");
+  };
+
+  ws.onerror = () => appendError("WebSocket error.");
+
+  ws.onmessage = (e) => {
+    const data = JSON.parse(e.data);
+    handleMessage(data);
+  };
+}
+
+// ── Message handlers ───────────────────────────────────────────────────────
+function handleMessage(data) {
+  switch (data.type) {
+    case "response":
+      removePlanCard();
+      appendAgent(data.content, data.usage);
+      break;
+    case "questions":
+      appendQuestions(data.questions);
+      break;
+    case "plan":
+      appendPlan(data);
+      break;
+    case "executing":
+      appendExecuting(data.topology_id);
+      break;
+    case "result":
+      appendResult(data);
+      break;
+    case "error":
+      appendError(data.message);
+      break;
+  }
+}
+
+// ── Append helpers ─────────────────────────────────────────────────────────
+function scrollBottom() {
+  const m = document.getElementById("messages");
+  m.scrollTop = m.scrollHeight;
+}
+
+function appendMsg(el) {
+  document.getElementById("messages").appendChild(el);
+  scrollBottom();
+  return el;
+}
+
+function appendUser(text) {
+  const d = document.createElement("div");
+  d.className = "msg user";
+  d.textContent = text;
+  appendMsg(d);
+}
+
+function appendAgent(text, usage) {
+  const d = document.createElement("div");
+  d.className = "msg agent";
+  d.textContent = text;
+  if (usage && usage.total_tokens) {
+    const m = document.createElement("div");
+    m.style.cssText = "font-size:0.75rem;color:#475569;margin-top:6px;";
+    m.textContent = `${usage.total_tokens} tokens · $${(usage.total_cost_usd||0).toFixed(4)}`;
+    d.appendChild(m);
+  }
+  appendMsg(d);
+}
+
+function appendSystem(text) {
+  const d = document.createElement("div");
+  d.className = "msg system";
+  d.textContent = text;
+  appendMsg(d);
+}
+
+function appendError(text) {
+  const d = document.createElement("div");
+  d.className = "msg error";
+  d.textContent = "Error: " + text;
+  appendMsg(d);
+}
+
+function appendExecuting(topoId) {
+  const d = document.createElement("div");
+  d.className = "executing-row";
+  d.innerHTML = `<div class="spinner"></div><span>Executing pipeline${topoId ? " · " + topoId.slice(0,8) + "…" : ""}…</span>`;
+  appendMsg(d);
+}
+
+function removePlanCard() {
+  if (pendingPlanEl) {
+    pendingPlanEl.remove();
+    pendingPlanEl = null;
+  }
+}
+
+function appendPlan(data) {
+  removePlanCard();
+  const card = document.createElement("div");
+  card.className = "plan-card";
+  const cost = (data.cost_usd || 0).toFixed(4);
+  const minCost = (data.min_cost_usd || 0).toFixed(4);
+  const lat = (data.latency_seconds || 0).toFixed(1);
+  card.innerHTML = `
+    <h3>Proposed Plan</h3>
+    <div class="summary">${esc(data.summary || "")}</div>
+    <div class="plan-meta">
+      <span>Est. cost: <b>$${cost}</b> (min $${minCost})</span>
+      <span>Est. time: <b>${lat}s</b></span>
+    </div>
+    <div class="plan-actions">
+      <button class="btn btn-approve">Approve</button>
+      <button class="btn btn-cheaper">Make cheaper</button>
+      <button class="btn btn-cancel">Cancel</button>
+    </div>`;
+  card.querySelector(".btn-approve").addEventListener("click", () => {
+    ws.send(JSON.stringify({ type: "message", content: "approve" }));
+    disablePlanBtns(card);
+    appendUser("approve");
+  });
+  card.querySelector(".btn-cheaper").addEventListener("click", () => {
+    ws.send(JSON.stringify({ type: "make_cheaper" }));
+    disablePlanBtns(card);
+    appendUser("make cheaper");
+  });
+  card.querySelector(".btn-cancel").addEventListener("click", () => {
+    ws.send(JSON.stringify({ type: "cancel" }));
+    disablePlanBtns(card);
+    appendUser("cancel");
+  });
+  pendingPlanEl = appendMsg(card);
+}
+
+function disablePlanBtns(card) {
+  card.querySelectorAll(".btn").forEach(b => b.disabled = true);
+}
+
+function appendQuestions(questions) {
+  const card = document.createElement("div");
+  card.className = "questions-card";
+  card.innerHTML = `<h3>Questions</h3>`;
+  const inputs = [];
+  questions.forEach((q, i) => {
+    const item = document.createElement("div");
+    item.className = "q-item";
+    const label = document.createElement("label");
+    label.textContent = (i + 1) + ". " + (typeof q === "string" ? q : q.question || JSON.stringify(q));
+    item.appendChild(label);
+    let input;
+    if (typeof q === "object" && q.options) {
+      input = document.createElement("select");
+      q.options.forEach(opt => {
+        const o = document.createElement("option");
+        o.value = opt; o.textContent = opt;
+        input.appendChild(o);
+      });
+    } else {
+      input = document.createElement("input");
+      input.type = "text";
+      input.placeholder = "Your answer…";
+    }
+    item.appendChild(input);
+    inputs.push(input);
+    card.appendChild(item);
+  });
+  const submitBtn = document.createElement("button");
+  submitBtn.className = "btn btn-approve";
+  submitBtn.textContent = "Submit answers";
+  submitBtn.addEventListener("click", () => {
+    const answers = inputs.map(inp => inp.value || inp.options?.[inp.selectedIndex]?.value || "");
+    ws.send(JSON.stringify({ type: "answer", answers }));
+    submitBtn.disabled = true;
+    inputs.forEach(i => i.disabled = true);
+  });
+  card.appendChild(submitBtn);
+  appendMsg(card);
+}
+
+function appendResult(data) {
+  const card = document.createElement("div");
+  card.className = "result-card";
+  const output = typeof data.output === "string" ? data.output : JSON.stringify(data.output, null, 2);
+  const cost = data.cost_usd != null ? `$${parseFloat(data.cost_usd).toFixed(4)}` : "";
+  const lat = data.latency_seconds != null ? `${parseFloat(data.latency_seconds).toFixed(1)}s` : "";
+  card.innerHTML = `<h3>Result</h3><pre>${esc(output)}</pre>`;
+  if (cost || lat) {
+    const meta = document.createElement("div");
+    meta.className = "result-meta";
+    meta.textContent = [cost, lat].filter(Boolean).join(" · ");
+    card.appendChild(meta);
+  }
+  appendMsg(card);
+}
+
+function esc(s) {
+  return String(s)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+// ── Send ───────────────────────────────────────────────────────────────────
+const inputEl = document.getElementById("input");
+const sendBtn = document.getElementById("send-btn");
+
+function send() {
+  const text = inputEl.value.trim();
+  if (!text || !ws || ws.readyState !== WebSocket.OPEN) return;
+  ws.send(JSON.stringify({ type: "message", content: text }));
+  appendUser(text);
+  inputEl.value = "";
+  inputEl.style.height = "";
+}
+
+sendBtn.addEventListener("click", send);
+inputEl.addEventListener("keydown", e => {
+  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
+});
+inputEl.addEventListener("input", () => {
+  inputEl.style.height = "auto";
+  inputEl.style.height = Math.min(inputEl.scrollHeight, 160) + "px";
+});
+</script>
+</body>
+</html>"""
 
 # Global singletons
 _session_store = SessionStore()
@@ -220,6 +766,13 @@ def _build_master_runtime_context(toolkit, memory, optimizer) -> dict:
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
+
+@app.get("/", response_class=HTMLResponse)
+async def chat_ui():
+    import os
+    auth_enabled = bool(os.environ.get("DAAP_API_KEY"))
+    return HTMLResponse(_CHAT_HTML.replace("__AUTH_ENABLED__", "true" if auth_enabled else "false"))
 
 
 @app.get("/models")
