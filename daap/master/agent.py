@@ -27,7 +27,7 @@ from daap.master.tools import (
 from daap.tools.registry import get_available_tool_names
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
-OPENROUTER_MASTER_MODEL = "google/gemini-2.5-flash"  # powerful tier — thinking mode, strong topology generation
+OPENROUTER_MASTER_MODEL = "qwen/qwen3.6-plus"  # powerful tier — thinking mode, strong topology generation
 
 
 # ---------------------------------------------------------------------------
