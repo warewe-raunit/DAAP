@@ -297,7 +297,7 @@ def test_session_scoped_toolkit_has_core_tools():
     toolkit = create_session_scoped_toolkit(session)
 
     registered = set(toolkit.tools.keys())
-    assert "generate_topology" in registered
+    assert "delegate_to_architect" in registered
     assert "ask_user" in registered
     assert "register_skill" in registered
     assert "get_execution_status" in registered
@@ -358,22 +358,29 @@ async def test_session_scoped_ask_user_uses_session_state():
 
 
 @pytest.mark.asyncio
-async def test_session_scoped_generate_topology_injects_selected_operator_config():
-    """Session-scoped generate_topology injects selected subagent operator/model config."""
+async def test_session_scoped_delegate_to_architect_injects_operator_config():
+    """Session-scoped delegate_to_architect injects selected subagent operator/model config."""
+    import json as _json
+    from unittest.mock import AsyncMock as _AM, MagicMock as _MM, patch as _patch
+    from agentscope.tool import ToolResponse
+    from agentscope.message import TextBlock
+
     session = Session(session_id="test-04", created_at=0.0)
     session.subagent_operator_config = {
         "provider": "openrouter",
         "base_url": "https://openrouter.ai/api/v1",
         "api_key_env": "OPENROUTER_API_KEY",
-        "model_map": {
-            "smart": "anthropic/claude-sonnet-4-6",
-        },
+        "model_map": {"smart": "anthropic/claude-sonnet-4-6"},
     }
 
-    toolkit = create_session_scoped_toolkit(session)
-    generate_fn = toolkit.tools["generate_topology"].original_func
-
-    topology_json = json.dumps({
+    # Topology that the real _delegate_to_architect_impl will "return" — pre-validated.
+    # We mock the impl to return a ToolResponse with topology+estimate metadata so
+    # the session wrapper can read and patch it with operator config.
+    fake_topo = {
+        "topology_id": "topo-aabbccdd",
+        "version": 1,
+        "created_at": "2026-04-23T00:00:00+00:00",
+        "user_prompt": "test",
         "nodes": [
             {
                 "node_id": "node_a",
@@ -382,14 +389,33 @@ async def test_session_scoped_generate_topology_injects_selected_operator_config
                     "model_map": {"smart": "old-model"},
                 },
             }
-        ]
-    })
+        ],
+        "edges": [],
+    }
+    fake_estimate = {
+        "total_cost_usd": 0.01,
+        "total_latency_seconds": 5.0,
+        "min_viable_cost_usd": 0.005,
+        "within_budget": True,
+        "within_timeout": True,
+    }
 
-    with patch("daap.api.sessions.generate_topology_tool", new=AsyncMock(return_value=MagicMock())) as mock_generate:
-        await generate_fn(topology_json)
+    async def _fake_delegate(current_topology_json, user_feedback, **_kwargs):
+        return ToolResponse(
+            content=[TextBlock(type="text", text="valid")],
+            metadata={
+                "topology": _json.loads(_json.dumps(fake_topo)),
+                "estimate": fake_estimate,
+            },
+        )
 
-    sent_json = mock_generate.await_args.args[0]
-    sent_topology = json.loads(sent_json)
+    toolkit = create_session_scoped_toolkit(session)
+    delegate_fn = toolkit.tools["delegate_to_architect"].original_func
 
-    assert sent_topology["operator_config"]["model_map"]["smart"] == "anthropic/claude-sonnet-4-6"
-    assert sent_topology["nodes"][0]["operator_override"]["model_map"]["smart"] == "anthropic/claude-sonnet-4-6"
+    with _patch("daap.api.sessions._delegate_to_architect_impl", new=_fake_delegate):
+        await delegate_fn("{}", "build test pipeline")
+
+    stored = session.pending_topology
+    assert stored is not None
+    assert stored["operator_config"]["model_map"]["smart"] == "anthropic/claude-sonnet-4-6"
+    assert stored["nodes"][0]["operator_override"]["model_map"]["smart"] == "anthropic/claude-sonnet-4-6"

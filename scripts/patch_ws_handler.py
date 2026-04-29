@@ -1,124 +1,5 @@
-"""
-DAAP WebSocket Handler — manages the master agent conversation loop over WebSocket.
-
-Message protocol (JSON over WebSocket):
-
-Client → Server:
-  {"type": "message", "content": "..."}                      user chat message
-  {"type": "answer", "answers": ["..."]}                     answers to ask_user questions
-  {"type": "permission_response", "granted": true/false}     file access approval
-  {"type": "make_cheaper"}                                   request cheaper topology
-  {"type": "cancel"}                                         cancel pending topology
-
-Server → Client:
-  {"type": "response", "content": "..."}                     agent text response
-  {"type": "questions", "questions": [...]}                  structured ask_user questions
-  {"type": "permission_request", "filepath": "...",
-   "operation": "read"|"write"}                              out-of-cwd file access request
-  {"type": "plan", "summary": "...", ...}                    topology plan awaiting approval
-  {"type": "executing", "topology_id": "..."}                execution started (sent by agent tool)
-  {"type": "result", "output": "...", ...}                   execution complete (sent by agent tool)
-  {"type": "error", "message": "..."}                        error
-"""
-
-import asyncio
-import json
-import logging
-
-from fastapi import WebSocket, WebSocketDisconnect
-from agentscope.message import Msg
-
-from daap.api.sessions import Session
-from daap.master.agent import _inject_plan_hint
-from daap.master.planner import plan_turn
-
-logger = logging.getLogger(__name__)
-
-
-_CHEAPER_TEXT_COMMANDS = {
-    "cheaper",
-    "make cheaper",
-    "make it cheaper",
-    "reduce cost",
-}
-_CANCEL_TEXT_COMMANDS = {
-    "cancel",
-    "abort",
-    "stop",
-}
-_APPROVE_TEXT_COMMANDS = {
-    "approve",
-    "proceed",
-    "run",
-    "execute",
-    "yes",
-    "yes execute",
-    "run it",
-    "execute it",
-}
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-def _msg_text(msg: Msg) -> str:
-    content = msg.content
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        parts = []
-        for block in content:
-            if isinstance(block, dict) and block.get("type") == "text":
-                parts.append(block.get("text", ""))
-            elif isinstance(block, str):
-                parts.append(block)
-        return "\n".join(p for p in parts if p).strip()
-    return str(content)
-
-
-def _normalize_text_command(text: str) -> str:
-    return " ".join((text or "").strip().lower().split())
-
-
-def _detect_text_command(text: str) -> tuple[str, str | None] | None:
-    """
-    Detect command-like chat text for pending topology control.
-
-    Returns:
-      ("make_cheaper", None)
-      ("cancel", None)
-      None
-    """
-    normalized = _normalize_text_command(text)
-    if not normalized:
-        return None
-
-    if normalized in _CHEAPER_TEXT_COMMANDS:
-        return ("make_cheaper", None)
-
-    if normalized in _CANCEL_TEXT_COMMANDS:
-        return ("cancel", None)
-
-    if normalized in _APPROVE_TEXT_COMMANDS:
-        return ("approve", None)
-
-    return None
-
-
-def _tool_response_text(result) -> str:
-    parts = []
-    for block in getattr(result, "content", []) or []:
-        if isinstance(block, dict):
-            parts.append(str(block.get("text", "")))
-        elif hasattr(block, "text"):
-            parts.append(str(block.text))
-        else:
-            parts.append(str(block))
-    return "\n".join(p for p in parts if p).strip()
-
-
-def _cancel_active_task(session) -> None:
+import sys
+code = '''def _cancel_active_task(session) -> None:
     if getattr(session, "active_task", None) and not session.active_task.done():
         session.active_task.cancel()
 
@@ -402,3 +283,9 @@ async def handle_websocket(
     finally:
         monitor_task.cancel()
         _cancel_active_task(session)
+'''
+with open('c:/Users/aman/DAAP/daap/api/ws_handler.py', 'r', encoding='utf-8') as f:
+    lines = f.readlines()
+with open('c:/Users/aman/DAAP/daap/api/ws_handler.py', 'w', encoding='utf-8') as f:
+    f.writelines(lines[:120])
+    f.write(code)

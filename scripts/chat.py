@@ -12,7 +12,7 @@ Commands during chat:
     /cancel      — cancel pending topology
     /sessions    — list all saved sessions (resume with --session <id>)
     /history     — list saved topologies
-    /topology    — list topologies; /topology load <id> to reload one
+    /topology    — list topologies; /topology load <id> to reload, /topology delete <id> to remove
     /memory      — list profile facts; search/delete subcommands
     /clear       — clear conversation history (start fresh)
     /profile     — show user profile + optimizer summary
@@ -27,6 +27,11 @@ Commands during chat:
 
 Requires: OPENROUTER_API_KEY in .env or environment.
 """
+
+import os
+# Must be set before any pydantic-importing module loads (jiter DLL blocked by App Control)
+os.environ.setdefault("PYDANTIC_PURE_PYTHON", "1")
+os.environ.setdefault("PYTHONIOENCODING", "utf-8")
 
 import argparse
 import asyncio
@@ -60,7 +65,6 @@ from agentscope.message import Msg
 from daap.api.sessions import Session, SessionManager, create_session_scoped_toolkit
 from daap.identity import load_local_user, resolve_cli_user
 from daap.master.agent import create_master_agent_with_toolkit
-from daap.master.tools import clear_last_topology_result
 from daap.topology.store import TopologyStore
 from daap.tools.token_tracker import TokenTracker
 
@@ -1008,7 +1012,11 @@ async def _remote_main(args: argparse.Namespace) -> None:
     if not _api_url_arg:
         _server_file = pathlib.Path.home() / ".daap" / "server"
         if _server_file.exists():
-            _api_url_arg = _server_file.read_text(encoding="utf-8").strip()
+            raw = _server_file.read_bytes()
+            if raw[:2] in (b'\xff\xfe', b'\xfe\xff'):
+                _api_url_arg = raw.decode("utf-16").strip()
+            else:
+                _api_url_arg = raw.decode("utf-8-sig").strip()
     if not _api_url_arg:
         _print_error("No server URL. Pass --api-url or run: echo 'http://<ip>:8000' > ~/.daap/server")
         return
@@ -1542,7 +1550,7 @@ async def main(args: argparse.Namespace | None = None):
         "/help", "/approve", "/cheaper", "/cancel",
         "/sessions", "/history",
         "/memory", "/memory search", "/memory delete", "/memory clear",
-        "/topology", "/topology load",
+        "/topology", "/topology load", "/topology delete",
         "/profile", "/mcp", "/skills",
         "/skill", "/skill add", "/skill remove", "/skill create",
         "/rate", "/clear", "/raw", "/clean", "/quit",
@@ -1797,6 +1805,15 @@ async def main(args: argparse.Namespace | None = None):
                         session.pending_estimate = None
                         _print_system(f"Loaded: {match.name or match.topology_id}")
                         _print_system("Use /approve to execute, or chat to modify.")
+                elif sub == "delete" and len(parts) > 2:
+                    topo_id_prefix = parts[2].strip()
+                    topos = topology_store.list_topologies(user_id)
+                    match = next((t for t in topos if t.topology_id.startswith(topo_id_prefix)), None)
+                    if not match:
+                        _print_system(f"Topology not found: {topo_id_prefix}")
+                    else:
+                        topology_store.delete_topology(match.topology_id)
+                        _print_system(f"Deleted topology: {match.name or match.topology_id}")
                 else:
                     topos = topology_store.list_topologies(user_id)
                     if not topos:
@@ -1807,7 +1824,7 @@ async def main(args: argparse.Namespace | None = None):
                             import datetime
                             ts = datetime.datetime.fromtimestamp(t.updated_at).strftime("%Y-%m-%d %H:%M")
                             print(f"  {t.topology_id[:12]}  {ts}  {t.name or '(unnamed)'}")
-                        _print_system("Use /topology load <id-prefix> to reload.")
+                        _print_system("Use /topology load <id-prefix> or /topology delete <id-prefix>.")
                 continue
 
             # ------------------------------------------------------------------
@@ -1847,7 +1864,6 @@ async def main(args: argparse.Namespace | None = None):
 
             # ------------------------------------------------------------------
             # Normal message to agent
-            clear_last_topology_result()
             session.conversation.append({"role": "user", "content": user_input})
 
             _print_system("Thinking...")
@@ -1857,15 +1873,13 @@ async def main(args: argparse.Namespace | None = None):
                 _print_error(_format_turn_error(exc))
                 if _is_auth_error(exc):
                     _print_system("Tip: verify OPENROUTER_API_KEY in your shell or .env and restart if needed.")
-                clear_last_topology_result()
                 continue
 
             session.conversation.append({"role": "assistant", "content": response_text})
 
             # Check if topology was generated this turn.
-            # session-scoped toolkit stores result on session and clears the
-            # ContextVar itself, so we must check session.topology_just_generated
-            # (not get_last_topology_result() which is always None here).
+            # The session-scoped toolkit stores the result on `session` directly
+            # (pending_topology / pending_estimate) — check topology_just_generated.
             # If the agent also called ask_user + execute in the same turn,
             # topology_just_generated was already cleared inside _run_agent_turn
             # and pending_topology may be None — skip the plan display.

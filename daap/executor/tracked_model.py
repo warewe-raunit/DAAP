@@ -19,6 +19,14 @@ class TrackedOpenAIChatModel(OpenAIChatModel):
 
     async def __call__(self, *args, **kwargs):
         result = await super().__call__(*args, **kwargs)
+        # Qwen3 thinking mode emits thinking blocks. OpenAIChatFormatter warns and
+        # skips them, corrupting conversation history on the next turn. Strip here
+        # so they never enter BoundedMemory.
+        if hasattr(result, "content") and isinstance(result.content, list):
+            result.content = [
+                b for b in result.content
+                if not (isinstance(b, dict) and b.get("type") == "thinking")
+            ]
         if self._tracker is not None:
             usage = getattr(result, "usage", None)
             if usage is not None:

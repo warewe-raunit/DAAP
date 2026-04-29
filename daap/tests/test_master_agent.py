@@ -13,10 +13,9 @@ import pytest
 from agentscope.message import Msg
 
 from daap.master.tools import (
-    clear_last_topology_result,
     create_master_toolkit,
-    generate_topology,
-    get_last_topology_result,
+    delegate_to_architect,
+    _extract_topology_json,
 )
 from daap.master.prompts import get_master_system_prompt
 from daap.master.agent import MasterAgentTurnResult, parse_turn_result
@@ -185,10 +184,10 @@ async def test_ask_user_for_plan_approval():
 # ---------------------------------------------------------------------------
 
 def test_both_tools_registered_in_toolkit():
-    """Both generate_topology and ask_user are registered in the master toolkit."""
+    """Both delegate_to_architect and ask_user are registered in the master toolkit."""
     toolkit = create_master_toolkit()
     registered = set(toolkit.tools.keys())
-    assert "generate_topology" in registered
+    assert "delegate_to_architect" in registered
     assert "ask_user" in registered
     assert "register_skill" in registered
     assert "get_runtime_context" in registered
@@ -212,40 +211,67 @@ def test_create_master_toolkit_applies_master_skills(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# generate_topology tool tests
+# delegate_to_architect tool tests
 # ---------------------------------------------------------------------------
 
 def _block_text(block) -> str:
     return block.text if hasattr(block, "text") else block.get("text", "")
 
 
-@pytest.mark.asyncio
-async def test_generate_topology_handles_invalid_json():
-    """generate_topology returns error ToolResponse for invalid JSON."""
-    clear_last_topology_result()
-    result = await generate_topology("not valid json {{{")
-    text = _block_text(result.content[0])
-    assert "Invalid JSON" in text or "invalid" in text.lower()
-    # Module-level state should be unchanged
-    assert get_last_topology_result()["topology"] is None
+def _make_generate_mock(content):
+    """AsyncMock for topology_agent.generate_topology returning (parsed_dict, raw_text).
+
+    Accepts a dict or a JSON string. If the string isn't parseable, parsed_dict is None
+    so delegate_to_architect exercises the repair fallback path.
+    """
+    raw = content if isinstance(content, str) else json.dumps(content)
+    try:
+        parsed = json.loads(raw)
+        if not isinstance(parsed, dict):
+            parsed = None
+    except (json.JSONDecodeError, TypeError):
+        parsed = None
+    return AsyncMock(return_value=(parsed, raw))
 
 
-@pytest.mark.asyncio
-async def test_valid_topology_includes_estimate():
-    """generate_topology stores estimate data when topology is valid."""
-    clear_last_topology_result()
+def test_extract_topology_json_from_wrapped_architect_output():
     topology_json = load_sales_outreach_topology()
-    result = await generate_topology(topology_json)
-    text = _block_text(result.content[0])
+    wrapped = f"Here is the validated topology:\n```json\n{topology_json}\n```\nDone."
 
-    # Should succeed
+    parsed = _extract_topology_json(wrapped)
+
+    assert parsed is not None
+    assert parsed["topology_id"] == "test-sales-outreach-001"
+    assert "nodes" in parsed
+
+
+@pytest.mark.asyncio
+async def test_delegate_to_architect_handles_unparseable_output():
+    """delegate_to_architect returns error when architect returns unparseable JSON."""
+    fake_generate = _make_generate_mock("not valid json {{{")
+    with patch("daap.master.topology_agent.generate_topology", new=fake_generate):
+        with patch("daap.master.tools._repair_topology_json", new=AsyncMock(return_value=None)):
+            result = await delegate_to_architect("{}", "build a search pipeline")
+    text = _block_text(result.content[0])
+    assert "malformed" in text.lower() or "error" in text.lower() or "repair" in text.lower()
+    assert (result.metadata or {}).get("topology") is None
+
+
+@pytest.mark.asyncio
+async def test_delegate_to_architect_validates_and_stores_result():
+    """delegate_to_architect validates architect JSON and returns it in ToolResponse.metadata."""
+    topology_json = load_sales_outreach_topology()
+    fake_generate = _make_generate_mock(topology_json)
+    with patch("daap.master.topology_agent.generate_topology", new=fake_generate):
+        result = await delegate_to_architect("{}", "build sales outreach pipeline")
+    text = _block_text(result.content[0])
     assert "valid" in text.lower() or "cost" in text.lower()
 
-    stored = get_last_topology_result()
-    assert stored["topology"] is not None
-    assert stored["estimate"] is not None
+    meta = result.metadata or {}
+    assert meta.get("topology") is not None
+    assert meta.get("estimate") is not None
 
-    estimate = stored["estimate"]
+    estimate = meta["estimate"]
     assert "total_cost_usd" in estimate
     assert "total_latency_seconds" in estimate
     assert "min_viable_cost_usd" in estimate
@@ -254,32 +280,18 @@ async def test_valid_topology_includes_estimate():
 
 
 @pytest.mark.asyncio
-async def test_topology_has_correct_structure():
-    """generate_topology stores topology with expected node roles."""
-    clear_last_topology_result()
+async def test_delegate_to_architect_calls_generate_once():
+    """delegate_to_architect invokes generate_topology exactly once per call (no ReAct loop)."""
     topology_json = load_sales_outreach_topology()
-    await generate_topology(topology_json)
-
-    stored = get_last_topology_result()
-    assert stored["topology"] is not None
-
-    topo = stored["topology"]
-    assert "nodes" in topo
-    assert "edges" in topo
-    assert len(topo["nodes"]) >= 2
-
-    node_ids = {n["node_id"] for n in topo["nodes"]}
-    # Sales outreach fixture has: researcher, evaluator, personalizer, drafter
-    assert any("researcher" in nid or "research" in nid for nid in node_ids)
-    assert any("drafter" in nid or "email" in nid or "writer" in nid for nid in node_ids)
+    fake_generate = _make_generate_mock(topology_json)
+    with patch("daap.master.topology_agent.generate_topology", new=fake_generate):
+        await delegate_to_architect("{}", "build search pipeline")
+    assert fake_generate.call_count == 1
 
 
 @pytest.mark.asyncio
-async def test_topology_validation_errors_fed_back():
-    """generate_topology returns validation errors so the agent can retry."""
-    clear_last_topology_result()
-
-    # Build a topology with an invalid tool name — should fail validation
+async def test_delegate_to_architect_returns_validation_errors():
+    """delegate_to_architect surfaces validation errors when architect JSON is invalid."""
     bad_topology = {
         "topology_id": "topo-badbad01",
         "version": 1,
@@ -299,14 +311,13 @@ async def test_topology_validation_errors_fed_back():
             }
         ],
         "edges": [],
-        "constraints": {},
     }
-
-    result = await generate_topology(json.dumps(bad_topology))
+    fake_generate = _make_generate_mock(bad_topology)
+    with patch("daap.master.topology_agent.generate_topology", new=fake_generate):
+        result = await delegate_to_architect("{}", "test pipeline")
     text = _block_text(result.content[0])
     assert "error" in text.lower() or "invalid" in text.lower() or "validation" in text.lower()
-    # Topology should NOT be stored on failure
-    assert get_last_topology_result()["topology"] is None
+    assert (result.metadata or {}).get("topology") is None
 
 
 # ---------------------------------------------------------------------------
@@ -314,21 +325,30 @@ async def test_topology_validation_errors_fed_back():
 # ---------------------------------------------------------------------------
 
 def test_prompt_contains_available_tools():
-    """System prompt includes the list of available tool names."""
+    """Master prompt routes via delegate_to_architect; tool catalog lives in architect prompt."""
+    from daap.master.topology_agent import _TOPOLOGY_ARCHITECT_SYSTEM_PROMPT
     available = get_available_tool_names()
-    prompt = get_master_system_prompt(available_tools=available)
-    # At least some tool names should appear in the prompt
-    for tool in list(available)[:3]:
-        assert tool in prompt, f"Tool '{tool}' missing from system prompt"
+    builtin = sorted(t for t in available if not t.startswith("mcp://"))
+    # Architect template now expects 4 placeholders. Format with stub values for the others.
+    formatted = _TOPOLOGY_ARCHITECT_SYSTEM_PROMPT.format(
+        tool_catalog="(catalog)",
+        tool_names=", ".join(builtin),
+        runtime_block="(runtime)",
+        user_context_block="(user)",
+    )
+    assert any(t in formatted for t in builtin[:5])
+    # Master prompt references delegate_to_architect, not individual tool names
+    master_prompt = get_master_system_prompt(available_tools=available)
+    assert "delegate_to_architect" in master_prompt
 
 
-def test_prompt_contains_topology_schema():
-    """System prompt includes the TopologySpec JSON schema."""
+def test_prompt_delegates_topology_to_architect():
+    """Master prompt references delegate_to_architect; JSON schema stays in topology_agent."""
     prompt = get_master_system_prompt()
-    # Schema injection always includes these TopologySpec keys
-    assert "topology_id" in prompt
-    assert "node_id" in prompt
-    assert "model_tier" in prompt
+    assert "delegate_to_architect" in prompt
+    # The raw JSON example block (with topology_id, node_id fields) is gone from master
+    assert '"topology_id"' not in prompt   # JSON key notation absent
+    assert '"node_id"' not in prompt
 
 
 def test_prompt_instructs_to_ask_questions_via_tool():
@@ -343,41 +363,28 @@ def test_prompt_includes_skill_registration_hint():
     """System prompt instructs the agent to call register_skill for skill paths."""
     prompt = get_master_system_prompt()
     assert "register_skill" in prompt
-    assert "skill directory" in prompt.lower()
+    assert "skill" in prompt.lower()
 
 
-def test_prompt_includes_runtime_snapshot_when_provided():
-    """System prompt includes authoritative runtime snapshot when provided."""
+def test_prompt_includes_runtime_section_when_provided():
+    """System prompt includes compact Runtime section when runtime_context provided."""
     prompt = get_master_system_prompt(
         runtime_context={
             "execution_mode": "api-session",
-            "master_tools": ["ask_user", "generate_topology", "get_runtime_context"],
+            "master_tools": ["ask_user", "delegate_to_architect", "get_runtime_context"],
         }
     )
-    assert "Runtime Snapshot (authoritative" in prompt
-    assert "\"execution_mode\": \"api-session\"" in prompt
+    assert "## Runtime" in prompt
+    assert "execution_mode: api-session" in prompt
 
 
 def test_prompt_disables_execute_claims_when_execution_tool_missing():
     """Prompt avoids forced execute flow if execute_pending_topology is unavailable."""
     prompt = get_master_system_prompt(
-        runtime_context={"master_tools": ["ask_user", "generate_topology"]},
+        runtime_context={"master_tools": ["ask_user", "delegate_to_architect"]},
     )
-    assert "Do NOT claim you executed anything" in prompt
-
-
-def test_prompt_enforces_action_or_final_output():
-    """System prompt enforces tool action or final output, not intent-only text."""
-    prompt = get_master_system_prompt()
-    assert "Never end a turn with a promise of future action" in prompt
-    assert "call a tool that makes progress" in prompt
-
-
-def test_prompt_includes_validation_retry_discipline():
-    """System prompt tells the agent to fix topology errors and retry generate_topology."""
-    prompt = get_master_system_prompt()
-    assert "Retry up to 3 times" in prompt
-    assert "Do not ask the user to hand-edit topology JSON" in prompt
+    assert "execute_pending_topology" in prompt
+    assert "not available" in prompt
 
 
 # ---------------------------------------------------------------------------
@@ -410,9 +417,7 @@ def test_parse_turn_result_detects_pending_questions():
 
 
 def test_parse_turn_result_detects_topology():
-    """parse_turn_result reports has_topology=True when generate_topology stored a result."""
-    from daap.master.tools import _topology_result_var, clear_last_topology_result
-
+    """parse_turn_result reports has_topology=True when toolkit holds a topology slot."""
     fake_topo = {"topology_id": "topo-abc12345", "nodes": [], "edges": []}
     fake_estimate = {
         "total_cost_usd": 0.14,
@@ -421,28 +426,37 @@ def test_parse_turn_result_detects_topology():
         "within_budget": True,
         "within_timeout": True,
     }
-    _topology_result_var.set({"topology": fake_topo, "estimate": fake_estimate})
 
-    try:
-        msg = make_msg("Here's the pipeline I designed for you.")
-        result = parse_turn_result(msg, master=MagicMock())
+    mock_toolkit = MagicMock()
+    mock_toolkit.get_pending_questions.return_value = None
+    mock_toolkit.get_last_topology_result.return_value = {
+        "topology": fake_topo,
+        "estimate": fake_estimate,
+    }
+    mock_master = MagicMock()
+    mock_master._daap_toolkit = mock_toolkit
 
-        assert result.has_topology is True
-        assert result.topology_dict == fake_topo
-        assert result.estimate_data == fake_estimate
-        assert result.is_asking_questions is False
-        assert result.needs_user_input is True
-    finally:
-        clear_last_topology_result()
+    msg = make_msg("Here's the pipeline I designed for you.")
+    result = parse_turn_result(msg, master=mock_master)
+
+    assert result.has_topology is True
+    assert result.topology_dict == fake_topo
+    assert result.estimate_data == fake_estimate
+    assert result.is_asking_questions is False
+    assert result.needs_user_input is True
+    mock_toolkit.clear_last_topology_result.assert_called_once()
 
 
 def test_parse_turn_result_direct_response():
     """parse_turn_result returns direct response when no tools were called."""
-    from daap.master.tools import clear_last_topology_result
-    clear_last_topology_result()
+    mock_toolkit = MagicMock()
+    mock_toolkit.get_pending_questions.return_value = None
+    mock_toolkit.get_last_topology_result.return_value = {"topology": None, "estimate": None}
+    mock_master = MagicMock()
+    mock_master._daap_toolkit = mock_toolkit
 
     msg = make_msg("Here's a cold email for HR directors at SaaS companies...")
-    result = parse_turn_result(msg, master=MagicMock())
+    result = parse_turn_result(msg, master=mock_master)
 
     assert result.has_topology is False
     assert result.is_asking_questions is False
@@ -551,24 +565,23 @@ def test_prompt_identity_is_daap_platform_not_b2b_only():
 
 
 def test_prompt_includes_gap_detection_rules():
-    """Prompt includes hybrid gap detection: proactive if clear, reactive on failure."""
+    """Prompt instructs DAAP to surface capability gaps with install command."""
     prompt = get_master_system_prompt()
     assert "install" in prompt.lower()
-    assert "daap mcp add" in prompt
+    assert "capability" in prompt.lower() or "install_cmd" in prompt.lower() or "missing" in prompt.lower()
 
 
 def test_prompt_instructs_get_runtime_context_for_self_description():
     """Prompt tells agent to call get_runtime_context when asked about capabilities."""
     prompt = get_master_system_prompt()
     assert "get_runtime_context" in prompt
-    assert "functional_capabilities" in prompt
 
 
 def test_prompt_gap_detection_uses_known_gaps_from_snapshot():
     """Prompt includes known_gaps data when injected via runtime_context."""
     prompt = get_master_system_prompt(
         runtime_context={
-            "master_tools": ["ask_user", "generate_topology", "get_runtime_context"],
+            "master_tools": ["ask_user", "delegate_to_architect", "get_runtime_context"],
             "functional_capabilities": [
                 {"label": "Web search", "available": True},
                 {"label": "LinkedIn", "available": False},

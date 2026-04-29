@@ -16,7 +16,86 @@ from xml.sax.saxutils import escape
 
 from agentscope.message import Msg
 
-from daap.executor.node_builder import BuiltNode
+from daap.executor.context_manager import truncate_input_for_model
+from daap.executor.node_builder import BuiltNode, NodeResult
+
+
+class NodeExecutionFailed(RuntimeError):
+    """Raised when a node emits the EXECUTION_FAILED sentinel.
+
+    Carries structured context so the engine can build a rich trace for the
+    Master Agent instead of surfacing a raw exception string.
+    """
+    def __init__(
+        self,
+        node_id: str,
+        reason: str,
+        last_output: str = "",
+        tool_context: str = "",
+    ):
+        self.node_id = node_id
+        self.reason = reason
+        self.last_output = last_output
+        self.tool_context = tool_context  # extracted tool call/result pairs
+        super().__init__(f"Node '{node_id}' aborted execution: {reason}")
+
+
+def _extract_tool_context(memory, max_pairs: int = 5) -> str:
+    """
+    Extract the last N tool-call + tool-result pairs from a BoundedMemory.
+
+    Returns a compact multi-line string like:
+      [tool_call] RedditSearch({"query": "...", "time_filter": "day"})
+      [tool_result] No Reddit posts found for ...
+
+    This gives the Master Agent the actual evidence (which queries ran, what
+    they returned) rather than just the node's summarised reason string.
+    """
+    try:
+        raw_msgs = [msg for msg, _ in memory.content]
+    except Exception:
+        return ""
+
+    pairs: list[str] = []
+    i = 0
+    while i < len(raw_msgs):
+        msg = raw_msgs[i]
+        content = msg.content
+
+        # Detect assistant tool_use block
+        if isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "tool_use":
+                    tool_name = block.get("name", "unknown_tool")
+                    import json as _json
+                    try:
+                        args = _json.dumps(block.get("input", {}), ensure_ascii=False)
+                    except Exception:
+                        args = str(block.get("input", {}))
+                    call_line = f"[tool_call] {tool_name}({args[:300]})"
+
+                    # Look for the paired tool_result in the next message
+                    result_line = ""
+                    if i + 1 < len(raw_msgs):
+                        next_msg = raw_msgs[i + 1]
+                        nc = next_msg.content
+                        if isinstance(nc, list):
+                            for rb in nc:
+                                if isinstance(rb, dict) and rb.get("type") == "tool_result":
+                                    result_text = str(rb.get("output") or rb.get("content") or "")
+                                    result_line = f"[tool_result] {result_text[:400]}"
+                                    break
+                        elif isinstance(nc, str):
+                            result_line = f"[tool_result] {nc[:400]}"
+
+                    pairs.append(call_line + ("\n" + result_line if result_line else ""))
+        i += 1
+
+    if not pairs:
+        return ""
+
+    recent = pairs[-max_pairs:]
+    return "\n".join(recent)
 from daap.tools.token_tracker import TokenTracker
 
 
@@ -77,8 +156,27 @@ async def run_parallel_instances(
     def _clone_input(msg: Msg) -> Msg:
         return Msg(name=msg.name, content=msg.content, role=msg.role)
 
+    structured_model = NodeResult if built_node.agent_mode == "react" else None
+
+    async def _call_agent(agent, msg: Msg) -> Msg:
+        result = await agent.reply(msg, structured_model=structured_model)
+        # Extract structured result back into content so all downstream
+        # code continues to read msg.content unchanged.
+        if (
+            structured_model is not None
+            and result.metadata
+            and isinstance(result.metadata, dict)
+            and "result" in result.metadata
+        ):
+            result = Msg(
+                name=result.name,
+                content=result.metadata["result"],
+                role="assistant",
+            )
+        return result
+
     if n == 1:
-        result = await built_node.agent(_clone_input(input_msg))
+        result = await _call_agent(built_node.agent, _clone_input(input_msg))
         return [result]
 
     tasks = []
@@ -87,10 +185,10 @@ async def run_parallel_instances(
         # cross-instance memory/state contamination.
         if built_node.agent_factory is not None:
             agent_instance = built_node.agent_factory()
-            tasks.append(agent_instance(_clone_input(input_msg)))
+            tasks.append(_call_agent(agent_instance, _clone_input(input_msg)))
         else:
             # Backward-compatible fallback for tests/mocks that do not set a factory.
-            tasks.append(built_node.agent(_clone_input(input_msg)))
+            tasks.append(_call_agent(built_node.agent, _clone_input(input_msg)))
 
     results = await asyncio.gather(*tasks, return_exceptions=False)
     return list(results)
@@ -215,6 +313,7 @@ async def _llm_consolidate(
             api_key=os.environ.get(api_key_env, ""),
             client_kwargs=client_kwargs,
             stream=False,
+            generate_kwargs={"temperature": 0, "seed": 42},
             tracker=tracker,
         )
         formatter = OpenAIChatFormatter()
@@ -290,6 +389,7 @@ async def run_execution_step(
                 combined = _DATA_PREAMBLE + "\n\n" + "\n\n".join(parts)
             else:
                 combined = initial_msg.content
+            combined = truncate_input_for_model(combined, built_node.model_id)
             node_input = Msg(name="user", content=combined, role="user")
 
         # Fan-out
@@ -304,6 +404,15 @@ async def run_execution_step(
                 raise ValueError(
                     f"Node '{built_node.node_id}' instance {i} returned empty output. "
                     f"This may indicate a model failure or prompt injection attempt."
+                )
+            
+            # Explicit failure bailout from ReAct agent (avoids hallucinated success)
+            if "EXECUTION_FAILED:" in text:
+                reason = text.split("EXECUTION_FAILED:", 1)[1].strip()
+                tool_ctx = _extract_tool_context(built_node.agent.memory)
+                raise NodeExecutionFailed(
+                    built_node.node_id, reason,
+                    last_output=text, tool_context=tool_ctx,
                 )
 
         # Consolidate if needed
@@ -331,9 +440,17 @@ async def run_execution_step(
         #  The engine passes output_key separately — see engine.py.)
         return built_node.node_id, result
 
-    # Run all nodes in this step concurrently
-    tasks = [_run_one(bn) for bn in built_nodes]
-    step_results = await asyncio.gather(*tasks)
+    # Run all nodes in this step concurrently.
+    # Fail-fast: if any node raises, cancel siblings immediately so they
+    # don't burn API credits or log misleading output as orphaned tasks.
+    task_objs = [asyncio.ensure_future(_run_one(bn)) for bn in built_nodes]
+    try:
+        step_results = await asyncio.gather(*task_objs)
+    except Exception:
+        for t in task_objs:
+            t.cancel()
+        await asyncio.gather(*task_objs, return_exceptions=True)
+        raise
 
     # Merge into input_data — caller maps node_id → output_key
     updated = dict(input_data)

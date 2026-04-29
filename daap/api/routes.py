@@ -86,6 +86,9 @@ header h1{font-size:.95rem;font-weight:600;color:#94a3b8;letter-spacing:.05em}
 .msg.agent{background:#1e2430;align-self:flex-start;border-bottom-left-radius:3px}
 .msg.error{background:#450a0a;color:#fca5a5;align-self:flex-start;border-left:3px solid #ef4444}
 .msg.system{background:transparent;color:#64748b;align-self:center;font-size:.78rem;font-style:italic;max-width:90%;text-align:center}
+.msg a,.plan-card a,.result-card a,.questions-card a{color:#60a5fa;text-decoration:underline;cursor:pointer;word-break:break-all}
+.msg a:hover,.plan-card a:hover,.result-card a:hover,.questions-card a:hover{color:#93c5fd;text-decoration:underline}
+.msg a:visited{color:#a78bfa}
 .usage-line{font-size:.72rem;color:#475569;margin-top:5px}
 .plan-card{background:#1a2235;border:1px solid #2d3f5e;border-radius:12px;padding:15px;align-self:flex-start;max-width:560px;display:flex;flex-direction:column;gap:10px}
 .plan-card h3{font-size:.78rem;color:#94a3b8;text-transform:uppercase;letter-spacing:.08em}
@@ -194,7 +197,7 @@ const CMD_DEFS = [
   ['/cancel',   'Cancel pending plan'],
   ['/clear',    'Clear conversation display'],
   ['/history',  'List saved topologies'],
-  ['/topology', 'List topologies  /topology load <id-prefix>'],
+  ['/topology', 'List topologies  /topology load <id-prefix>  /topology delete <id-prefix>'],
   ['/memory',   'Show memory  /memory search <q>  /memory clear'],
   ['/profile',  'Show user profile + memory facts'],
   ['/sessions', 'List active server sessions'],
@@ -476,10 +479,45 @@ function sanitize(text) {
   return s.replace(/\n{3,}/g, '\n\n').trim() || 'Done.';
 }
 
+function linkify(escapedText) {
+  // Step 1: Markdown links [label](url) → anchor
+  var text = escapedText.replace(/\[([^\]]+)\]\((https?:\/\/[^\s<)]+)\)/g, function(match, label, url) {
+    var realUrl = url.replace(/&amp;/g, '&');
+    return '<a href="' + realUrl + '" target="_blank" rel="noopener noreferrer" style="color:#60a5fa;text-decoration:underline;font-weight:500">' + label + '</a>';
+  });
+
+  // Step 2: bold **text**
+  text = text.replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>');
+
+  // Step 3: linkify raw URLs anywhere — split out existing anchors first so we
+  // never re-wrap an already-linkified URL.
+  var parts = text.split(/(<a\s[^>]*>[\s\S]*?<\/a>)/g);
+  var urlRegex = /(https?:\/\/[^\s<]+)/g;
+  for (var i = 0; i < parts.length; i++) {
+    if (parts[i].indexOf('<a ') === 0) continue;
+    parts[i] = parts[i].replace(urlRegex, function(url) {
+      var trailing = '';
+      var m = url.match(/([.,;:!?)\]'"`]+|&quot;|&gt;|&lt;|&#39;)$/);
+      if (m) {
+        trailing = m[1];
+        url = url.slice(0, url.length - trailing.length);
+      }
+      var realUrl = url.replace(/&amp;/g, '&');
+      return '<a href="' + realUrl + '" target="_blank" rel="noopener noreferrer" style="color:#60a5fa;text-decoration:underline">' + url + '</a>' + trailing;
+    });
+  }
+  return parts.join('');
+}
+
 function appendAgent(text, usage) {
   var d = document.createElement('div');
   d.className = 'msg agent';
-  d.textContent = sanitize(text);
+  var sanitized = sanitize(text);
+  if (rawMode) {
+    d.textContent = sanitized;
+  } else {
+    d.innerHTML = linkify(esc(sanitized));
+  }
   if (usage && usage.total_tokens) {
     var u = document.createElement('div');
     u.className = 'usage-line';
@@ -490,7 +528,8 @@ function appendAgent(text, usage) {
 }
 function appendSystem(text) {
   var d = document.createElement('div');
-  d.className = 'msg system'; d.textContent = text;
+  d.className = 'msg system';
+  d.innerHTML = linkify(esc(text || ''));
   return appendMsg(d);
 }
 function appendError(text) {
@@ -532,7 +571,7 @@ function appendPlan(data) {
   var cost = (data.cost_usd||0).toFixed(4), minC = (data.min_cost_usd||0).toFixed(4), lat = (data.latency_seconds||0).toFixed(1);
   card.innerHTML =
     '<h3>Proposed Plan</h3>' +
-    '<div class="summary">' + esc(data.summary||'') + '</div>' +
+    '<div class="summary">' + linkify(esc(data.summary||'')) + '</div>' +
     '<div class="plan-meta"><span>Cost: <b>$' + cost + '</b> (min $' + minC + ')</span><span>Time: <b>' + lat + 's</b></span></div>' +
     '<div class="plan-actions">' +
       '<button class="btn btn-approve">Approve</button>' +
@@ -602,7 +641,11 @@ function appendResult(data) {
   var out = typeof data.output === 'string' ? data.output : JSON.stringify(data.output, null, 2);
   var cost = data.cost_usd != null ? '$' + parseFloat(data.cost_usd).toFixed(4) : '';
   var lat  = data.latency_seconds != null ? parseFloat(data.latency_seconds).toFixed(1) + 's' : '';
-  card.innerHTML = '<h3>Result</h3><pre>' + esc(out) + '</pre>';
+  
+  var escapedOut = esc(out);
+  var htmlOut = linkify(escapedOut);
+  
+  card.innerHTML = '<h3>Result</h3><pre>' + htmlOut + '</pre>';
   if (cost || lat) {
     var m = document.createElement('div');
     m.className = 'result-meta'; m.textContent = [cost, lat].filter(Boolean).join(' · ');
@@ -734,6 +777,20 @@ async function cmdTopology(args) {
     appendUser('/topology load ' + args.slice(1).join(' '));
     return;
   }
+  if (args[0] === 'delete' && args[1]) {
+    var prefix = args[1];
+    try {
+      var r = await fetch('/api/v1/topologies/' + encodeURIComponent(userId), {headers:apiHeaders()});
+      if (!r.ok) { appendSystem('Could not fetch topologies: ' + r.status); return; }
+      var data = await r.json();
+      var match = data.topologies.find(function(t) { return t.topology_id.startsWith(prefix); });
+      if (!match) { appendSystem('Topology not found: ' + prefix); return; }
+      var delRes = await fetch('/api/v1/topologies/' + encodeURIComponent(match.topology_id), {method:'DELETE', headers:apiHeaders()});
+      if (!delRes.ok) { appendSystem('Failed to delete topology: ' + delRes.status); return; }
+      appendSystem('Deleted topology: ' + (match.name || match.topology_id));
+    } catch(e) { appendSystem('Delete error: ' + e.message); }
+    return;
+  }
   try {
     var r = await fetch('/api/v1/topologies/' + encodeURIComponent(userId), {headers:apiHeaders()});
     if (!r.ok) { appendSystem('Could not fetch topologies: ' + r.status); return; }
@@ -741,7 +798,7 @@ async function cmdTopology(args) {
     var topos = data.topologies;
     if (!topos.length) { appendSystem('No topologies saved yet.'); return; }
     var lines = topos.map(function(t) { return t.topology_id.slice(0,12) + '  ' + t.updated_at + '  ' + t.name + '  [v' + t.version + ']'; });
-    appendSystem('Saved topologies (' + topos.length + '):\n' + lines.join('\n') + '\nUse /topology load <id-prefix> to reload.');
+    appendSystem('Saved topologies (' + topos.length + '):\n' + lines.join('\n') + '\nUse /topology load <id-prefix> or /topology delete <id-prefix>');
   } catch(e) { appendSystem('Topology error: ' + e.message); }
 }
 
@@ -1027,8 +1084,19 @@ def _build_subagent_operator_config(
     }
 
 
-def _build_master_runtime_context(toolkit, memory, optimizer) -> dict:
+def _build_master_runtime_context(toolkit, memory, optimizer, user_id: str | None = None) -> dict:
     """Build runtime infra snapshot passed into the master system prompt."""
+    extra: dict = {}
+    if user_id:
+        try:
+            topos = topology_store.list_topologies(user_id)
+            if topos:
+                extra["saved_topologies"] = [
+                    {"id": t.topology_id, "name": t.name}
+                    for t in topos[:20]
+                ]
+        except Exception as exc:
+            logger.debug("Could not load saved topologies for runtime context: %s", exc)
     return build_master_runtime_snapshot(
         toolkit,
         execution_mode="api-session",
@@ -1037,6 +1105,7 @@ def _build_master_runtime_context(toolkit, memory, optimizer) -> dict:
         topology_store_enabled=True,
         feedback_store_enabled=True,
         session_store_enabled=True,
+        extra=extra if extra else None,
     )
 
 
@@ -1135,7 +1204,7 @@ async def create_session(
         user_context=user_context,
         operator_config=session.master_operator_config,
         tracker=session.token_tracker,
-        runtime_context=_build_master_runtime_context(toolkit, memory, optimizer),
+        runtime_context=_build_master_runtime_context(toolkit, memory, optimizer, user_id=session.user_id),
     )
     # Persist operator config so the agent can be recreated on reconnect
     session_manager.persist(session.session_id)
@@ -1418,7 +1487,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str, token: str |
                 user_context=user_context,
                 operator_config=session.master_operator_config,
                 tracker=session.token_tracker,
-                runtime_context=_build_master_runtime_context(toolkit, memory, optimizer),
+                runtime_context=_build_master_runtime_context(toolkit, memory, optimizer, user_id=session.user_id),
             )
             logger.info("Recreated master_agent for restored session %s", session_id)
         except Exception as exc:

@@ -34,6 +34,21 @@ class MockAgent:
         self.call_count += 1
         return Msg(name=self.name, content=self._response, role="assistant")
 
+    async def reply(self, msg, structured_model=None):
+        # Production interface (AgentScope ReActAgent) uses .reply() with a
+        # structured_model kwarg. Single-mode patterns.py calls reply with
+        # structured_model=None; react-mode passes NodeResult and reads
+        # result.metadata['result']. Mock both shapes.
+        self.call_count += 1
+        if structured_model is not None:
+            return Msg(
+                name=self.name,
+                content=self._response,
+                role="assistant",
+                metadata={"result": self._response},
+            )
+        return Msg(name=self.name, content=self._response, role="assistant")
+
 
 class FailOnceAgent:
     """Fails on first call, succeeds on subsequent calls."""
@@ -42,6 +57,9 @@ class FailOnceAgent:
         self.call_count = 0
 
     async def __call__(self, msg):
+        return await self.reply(msg)
+
+    async def reply(self, msg, structured_model=None):
         self.call_count += 1
         if self.call_count == 1:
             raise RuntimeError(f"Node {self.name} failed (attempt 1)")
@@ -53,6 +71,9 @@ class AlwaysFailAgent:
         self.name = name
 
     async def __call__(self, msg):
+        raise RuntimeError(f"Node {self.name} always fails")
+
+    async def reply(self, msg, structured_model=None):
         raise RuntimeError(f"Node {self.name} always fails")
 
 
@@ -83,7 +104,7 @@ def patch_build_node(responses: dict[str, str]):
     Patch build_node to return MockAgents keyed by node_id.
     responses: {node_id: response_text}
     """
-    async def _mock_build(resolved_node, tool_registry, daap_memory=None, tracker=None, user_id=None):
+    async def _mock_build(resolved_node, tool_registry, daap_memory=None, tracker=None, user_id=None, today=None):
         resp = responses.get(resolved_node.node_id, "mock output")
         return make_built_node(resolved_node.node_id, resp,
                                resolved_node.parallel_instances)
@@ -158,7 +179,7 @@ async def test_execute_parallel_topology():
 async def test_node_failure_returns_error():
     resolved = load_resolved("parallel_branches_topology.json")
 
-    async def _failing_build(resolved_node, tool_registry, daap_memory=None, tracker=None, user_id=None):
+    async def _failing_build(resolved_node, tool_registry, daap_memory=None, tracker=None, user_id=None, today=None):
         if resolved_node.node_id == "researcher_a":
             node = BuiltNode(
                 node_id=resolved_node.node_id,
@@ -189,7 +210,7 @@ async def test_retry_on_failure():
     resolved = load_resolved("parallel_branches_topology.json")
     fail_once = FailOnceAgent("input_parser")
 
-    async def _build_with_fail_once(resolved_node, tool_registry, daap_memory=None, tracker=None, user_id=None):
+    async def _build_with_fail_once(resolved_node, tool_registry, daap_memory=None, tracker=None, user_id=None, today=None):
         if resolved_node.node_id == "input_parser":
             return BuiltNode(
                 node_id="input_parser",
@@ -237,10 +258,20 @@ async def test_data_flows_between_nodes():
             self._response = response
 
         async def __call__(self, msg):
+            return await self.reply(msg)
+
+        async def reply(self, msg, structured_model=None):
             received_inputs[self.name] = msg.content
+            if structured_model is not None:
+                return Msg(
+                    name=self.name,
+                    content=self._response,
+                    role="assistant",
+                    metadata={"result": self._response},
+                )
             return Msg(name=self.name, content=self._response, role="assistant")
 
-    async def _recording_build(resolved_node, tool_registry, daap_memory=None, tracker=None, user_id=None):
+    async def _recording_build(resolved_node, tool_registry, daap_memory=None, tracker=None, user_id=None, today=None):
         resp = {
             "input_parser": "PARSED_DATA",
             "researcher_a": "RESEARCH_A",

@@ -26,10 +26,6 @@ except ImportError:
 
 from agentscope.message import Msg
 from daap.master.agent import create_master_agent
-from daap.master.tools import (
-    clear_last_topology_result,
-    get_last_topology_result,
-)
 
 # ---------------------------------------------------------------------------
 # Test suite — 20 prompts across verticals + complexity levels
@@ -197,9 +193,9 @@ AUTO_RESOLVE_ANSWERS = ["SaaS product", "Mid-market (50-500)", "Construction", "
 
 async def run_prompt(spec: dict, semaphore: asyncio.Semaphore) -> dict:
     async with semaphore:
-        clear_last_topology_result()
         master = create_master_agent()
         toolkit = master._daap_toolkit
+        toolkit.clear_last_topology_result()
 
         # Auto-resolve ask_user if triggered (so agent doesn't block forever)
         async def auto_resolve(agent_task: asyncio.Task):
@@ -230,7 +226,7 @@ async def run_prompt(spec: dict, semaphore: asyncio.Semaphore) -> dict:
             else str(response_msg.content)
         )
 
-        topo = get_last_topology_result()
+        topo = toolkit.get_last_topology_result()
         pending_qs = toolkit.get_pending_questions()
 
         if topo.get("topology") is not None:
@@ -240,7 +236,7 @@ async def run_prompt(spec: dict, semaphore: asyncio.Semaphore) -> dict:
         else:
             actual = "direct"
 
-        clear_last_topology_result()
+        toolkit.clear_last_topology_result()
 
         return {
             **spec,

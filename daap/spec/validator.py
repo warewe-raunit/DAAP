@@ -486,7 +486,10 @@ def _validate_patterns(
 # ---------------------------------------------------------------------------
 
 DEFAULT_AVAILABLE_TOOLS: set[str] = {
-    "WebSearch", "WebFetch", "ReadFile", "WriteFile", "CodeExecution",
+    "WebSearch", "WebFetch", "DeepCrawl",
+    "RedditSearch", "RedditFetch", "BatchRedditFetch",
+    "KeywordsEverywhere", "KeywordsEverywhereTraffic",
+    "ReadFile", "WriteFile", "CodeExecution",
 }
 DEFAULT_AVAILABLE_MODELS: set[str] = {"fast", "smart", "powerful"}
 

@@ -35,10 +35,6 @@ except ImportError:
 from agentscope.message import Msg
 from daap.api.sessions import Session, SessionManager, create_session_scoped_toolkit
 from daap.master.agent import create_master_agent_with_toolkit
-from daap.master.tools import (
-    clear_last_topology_result,
-    get_last_topology_result,
-)
 from daap.feedback.store import FeedbackStore
 from daap.feedback.collector import collect_run_feedback
 from daap.spec.schema import TopologySpec
@@ -85,7 +81,6 @@ def _next_answer(questions: list) -> list[str]:
 
 async def _run_agent_turn(session: Session, user_text: str) -> str:
     """Send one message to the master agent, auto-resolve any ask_user pauses."""
-    clear_last_topology_result()
     msg = Msg(name="user", content=user_text, role="user")
 
     agent_task = asyncio.create_task(session.master_agent(msg))
@@ -127,11 +122,11 @@ async def main():
     # Keep running turns until we get a topology
     max_turns = 6
     for turn in range(max_turns):
-        topo_result = get_last_topology_result()
+        topo_result = toolkit.get_last_topology_result()
         if topo_result.get("topology") is not None:
             session.pending_topology = topo_result["topology"]
             session.pending_estimate = topo_result["estimate"]
-            clear_last_topology_result()
+            toolkit.clear_last_topology_result()
             break
         if turn == max_turns - 1:
             print("\n[FAIL] Master agent did not generate a topology after max turns.")

@@ -78,29 +78,31 @@ class LinTSBandit:
             arm: ArmState(dim=dim) for arm in self.arms
         }
 
-    def select_arm(self, context: np.ndarray, rng: np.random.Generator = None) -> str:
+    def select_arm(
+        self,
+        context: np.ndarray,
+        rng: np.random.Generator = None,
+        greedy: bool = False,
+    ) -> str:
         """
-        Select an arm using Thompson Sampling.
+        Select an arm using Thompson Sampling (default) or greedy argmax.
 
-        For each arm:
-          1. Compute posterior: μ_a = B_a^{-1} @ f_a, Σ_a = v² × B_a^{-1}
-          2. Sample: θ̃_a ~ N(μ_a, Σ_a)
-          3. Score: s_a = context · θ̃_a
-
-        Pick arm with highest score.
+        greedy=True: pure exploitation — score = context @ mu (no sampling).
+        greedy=False: Thompson Sampling — samples theta from posterior.
 
         Args:
             context: feature vector of shape (dim,)
             rng: numpy random generator (for reproducibility in tests)
+            greedy: if True, use argmax(mu · context) — fully deterministic
 
         Returns:
             arm name (e.g., "fast", "smart", "powerful")
         """
-        if rng is None:
-            rng = np.random.default_rng()
-
         context = np.asarray(context, dtype=np.float64)
         assert context.shape == (self.dim,), f"Expected dim {self.dim}, got {context.shape}"
+
+        if rng is None:
+            rng = np.random.default_rng()
 
         best_arm = None
         best_score = -np.inf
@@ -109,15 +111,18 @@ class LinTSBandit:
             B_inv = np.linalg.inv(state.B)
             mu = B_inv @ state.f
 
-            try:
-                theta_sample = rng.multivariate_normal(
-                    mean=mu,
-                    cov=self.v_squared * B_inv,
-                )
-            except np.linalg.LinAlgError:
-                theta_sample = mu
+            if greedy:
+                theta = mu
+            else:
+                try:
+                    theta = rng.multivariate_normal(
+                        mean=mu,
+                        cov=self.v_squared * B_inv,
+                    )
+                except np.linalg.LinAlgError:
+                    theta = mu
 
-            score = context @ theta_sample
+            score = context @ theta
 
             if score > best_score:
                 best_score = score
@@ -197,14 +202,19 @@ class TopologyOptimizer:
         context: list[float],
         roles: list[str],
         rng: np.random.Generator = None,
+        greedy: bool = True,
     ) -> dict[str, str]:
         """
         Get model tier recommendations for each node role.
 
+        greedy=True (default): deterministic argmax — consistent output across runs.
+        greedy=False: Thompson Sampling — stochastic exploration.
+
         Args:
             context: feature vector from extract_context().to_vector()
             roles: list of node roles in the topology
-            rng: random generator for reproducibility
+            rng: random generator for reproducibility (used only if greedy=False)
+            greedy: if True, return argmax(mu · context) — no sampling noise
 
         Returns:
             {role: tier} dict. e.g., {"researcher": "fast", "writer": "smart"}
@@ -214,7 +224,7 @@ class TopologyOptimizer:
 
         for role in roles:
             bandit = self._get_or_create_bandit(role)
-            arm = bandit.select_arm(ctx, rng=rng)
+            arm = bandit.select_arm(ctx, rng=rng, greedy=greedy)
             recommendations[role] = arm
 
         return recommendations

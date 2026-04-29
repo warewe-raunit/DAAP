@@ -46,22 +46,25 @@ CAPABILITY_REGISTRY: list[CapabilityEntry] = [
         builtin_tool="CodeExecution",
     ),
     CapabilityEntry(
-        label="LinkedIn",
-        task_keywords=["linkedin", "people search", "profile", "prospect", "sales navigator"],
-        mcp_server="linkedin",
-        install_cmd="daap mcp add linkedin npx @daap/linkedin-mcp",
-        docs_url="https://mcp.so/server/linkedin",
+        label="Keyword search volume & CPC",
+        task_keywords=["keyword volume", "search volume", "cpc", "keyword research", "commercial intent", "seo keywords"],
+        builtin_tool="KeywordsEverywhere",
     ),
     CapabilityEntry(
-        label="Crunchbase",
-        task_keywords=["crunchbase", "funding", "investors", "startup data", "company data"],
+        label="URL organic traffic (Google ranking estimate)",
+        task_keywords=["google traffic", "url traffic", "organic traffic", "google ranking", "seo traffic", "google ranked"],
+        builtin_tool="KeywordsEverywhereTraffic",
+    ),
+    CapabilityEntry(
+        label="Company & funding data",
+        task_keywords=["crunchbase", "funding", "investors", "startup data", "company data", "valuation"],
         mcp_server="crunchbase",
         install_cmd="daap mcp add crunchbase npx @daap/crunchbase-mcp",
         docs_url="https://mcp.so/server/crunchbase",
     ),
     CapabilityEntry(
         label="Email sending",
-        task_keywords=["send email", "gmail", "smtp", "email outreach", "send outreach"],
+        task_keywords=["send email", "gmail", "smtp", "email", "outreach"],
         mcp_server="gmail",
         install_cmd="daap mcp add gmail npx @modelcontextprotocol/server-gmail",
         docs_url="https://mcp.so/server/gmail",
@@ -79,13 +82,6 @@ CAPABILITY_REGISTRY: list[CapabilityEntry] = [
         mcp_server="github",
         install_cmd="daap mcp add github npx @modelcontextprotocol/server-github",
         docs_url="https://mcp.so/server/github",
-    ),
-    CapabilityEntry(
-        label="HubSpot CRM",
-        task_keywords=["hubspot", "crm", "contacts", "deals", "pipeline"],
-        mcp_server="hubspot",
-        install_cmd="daap mcp add hubspot npx @daap/hubspot-mcp",
-        docs_url="https://mcp.so/server/hubspot",
     ),
 ]
 

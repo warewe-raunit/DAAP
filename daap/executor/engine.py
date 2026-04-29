@@ -12,13 +12,14 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass, field
+from datetime import datetime
 
 from agentscope.message import Msg
 
 from daap.executor.node_builder import build_node, BuiltNode
-from daap.executor.patterns import run_execution_step
+from daap.executor.patterns import run_execution_step, NodeExecutionFailed
 from daap.spec.resolver import ResolvedTopology, get_model_pricing
-from daap.tools.registry import get_tool_registry
+from daap.tools.registry import get_tool_registry, reset_reddit_session_state
 from daap.tools.token_tracker import TokenTracker
 
 logger = logging.getLogger(__name__)
@@ -51,6 +52,72 @@ def _is_server_error(exc: Exception) -> bool:
         pass
     msg = str(exc).lower()
     return any(code in msg for code in ("500", "502", "503", "504"))
+
+
+def _build_failure_trace(
+    exc: Exception,
+    step_nodes: list[str],
+    step_num: int,
+    total_steps: int,
+) -> str:
+    """
+    Build a structured Markdown trace injected into ExecutionResult.error.
+
+    The Master Agent receives this instead of a raw exception string, giving
+    it enough context to decide how to recover without needing a second LLM.
+    """
+    lines: list[str] = [
+        "## Topology Execution Failed",
+        "",
+        f"**Step**: {step_num} of {total_steps}  ",
+        f"**Nodes running in this step**: {', '.join(f'`{n}`' for n in step_nodes)}  ",
+    ]
+
+    if isinstance(exc, NodeExecutionFailed):
+        lines += [
+            f"**Failing node**: `{exc.node_id}`  ",
+            f"**Failure type**: Node emitted EXECUTION_FAILED sentinel  ",
+            "",
+            "### Reason reported by node",
+            "```",
+            exc.reason[:600],
+            "```",
+        ]
+        if exc.tool_context:
+            lines += [
+                "",
+                "### Tool calls made before failure (most recent last)",
+                "```",
+                exc.tool_context[:1200],
+                "```",
+            ]
+    else:
+        exc_type = type(exc).__name__
+        exc_msg = str(exc)
+        # Try to extract which node raised from message pattern "Node 'X' ..."
+        import re as _re
+        m = _re.search(r"Node '([^']+)'", exc_msg)
+        failing = m.group(1) if m else step_nodes[0]
+        lines += [
+            f"**Failing node**: `{failing}`  ",
+            f"**Exception type**: `{exc_type}`  ",
+            "",
+            "### Exception detail",
+            "```",
+            exc_msg[:800],
+            "```",
+        ]
+
+    lines += [
+        "",
+        "### What to check",
+        "- If EXECUTION_FAILED: node could not fulfil its scope — broaden queries, relax filters, or check tool API credentials/credits.",
+        "- If APIError / 402: check API key and account credits for the relevant tool.",
+        "- If TimeoutError / 5xx: transient — retry may succeed.",
+        "- If ValueError (empty output): node returned nothing — check model and prompt.",
+    ]
+
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -110,7 +177,12 @@ async def execute_topology(
     Phase 3 adds partial results, fallback nodes, and smarter retry.
     """
     run_start = time.time()
+    run_date = datetime.now().strftime("%Y-%m-%d")  # frozen for all nodes in this run
     node_results: list[NodeResult] = []
+
+    # Clear cross-call Reddit session state so a previous run's URL cache and
+    # seen-set do not leak into this run's tagging / dedup signals.
+    reset_reddit_session_state()
 
     try:
         from pathlib import Path
@@ -122,8 +194,19 @@ async def execute_topology(
         # 1. Build all nodes (optionally enriches system prompts via agent diary)
         built_nodes: dict[str, BuiltNode] = {}
         for rnode in resolved.nodes:
-            built = await build_node(rnode, tool_registry, daap_memory=daap_memory, tracker=exec_tracker, user_id=user_id)
+            logger.info(
+                "execute_topology: building node=%s mode=%s tools=%s",
+                rnode.node_id,
+                rnode.agent_mode,
+                rnode.concrete_tool_ids,
+            )
+            built = await build_node(rnode, tool_registry, daap_memory=daap_memory, tracker=exec_tracker, user_id=user_id, today=run_date)
             built_nodes[rnode.node_id] = built
+        logger.info(
+            "execute_topology: built %d nodes for topology=%s",
+            len(built_nodes),
+            resolved.topology_id,
+        )
 
         # 2. Map node_id → output data_key (first declared output)
         node_output_key: dict[str, str] = {
@@ -143,6 +226,12 @@ async def execute_topology(
         circuit_breaker_threshold: int = 2
 
         for step_num, step in enumerate(resolved.execution_order, 1):
+            logger.info(
+                "execute_topology: starting step %d/%d nodes=%s",
+                step_num,
+                total_steps,
+                step,
+            )
             step_nodes = [built_nodes[nid] for nid in step]
             max_retries = resolved.constraints.max_retries_per_node
 
@@ -213,20 +302,46 @@ async def execute_topology(
                                 total_output_tokens=exec_tracker.total_output,
                             )
                     if attempt < max_retries:
-                        await asyncio.sleep(1)
-
+                        import random
+                        base_sleep = min(10.0, 1.0 * (2 ** attempt))
+                        sleep_time = base_sleep + random.uniform(0, 1)
+                        await asyncio.sleep(sleep_time)
             if last_exc is not None:
-                failed_node = step[0]  # report first node in step
+                trace = _build_failure_trace(last_exc, step, step_num, total_steps)
                 return ExecutionResult(
                     topology_id=resolved.topology_id,
                     final_output="",
                     node_results=node_results,
                     total_latency_seconds=time.time() - run_start,
                     success=False,
-                    error=f"Node '{failed_node}' failed after {max_retries} retries: {last_exc}",
+                    error=trace,
                     total_input_tokens=exec_tracker.total_input,
                     total_output_tokens=exec_tracker.total_output,
                 )
+
+            # Check node output text for EXECUTION_FAILED sentinel.
+            # Tool errors are returned as text (not exceptions), so a node can
+            # "succeed" at the Python level while its output signals a fatal failure.
+            # Downstream nodes must not run on bad data.
+            for nid in step:
+                if nid in step_raw:
+                    raw_content = step_raw[nid].content if hasattr(step_raw[nid], "content") else str(step_raw[nid])
+                    raw_text = raw_content if isinstance(raw_content, str) else str(raw_content)
+                    if raw_text.strip().startswith("EXECUTION_FAILED"):
+                        logger.warning(
+                            "execute_topology: node '%s' emitted EXECUTION_FAILED sentinel — aborting pipeline. Output: %s",
+                            nid, raw_text[:300],
+                        )
+                        return ExecutionResult(
+                            topology_id=resolved.topology_id,
+                            final_output=raw_text,
+                            node_results=node_results,
+                            total_latency_seconds=round(time.time() - run_start, 3),
+                            success=False,
+                            error=f"Node '{nid}' reported execution failure: {raw_text[:200]}",
+                            total_input_tokens=exec_tracker.total_input,
+                            total_output_tokens=exec_tracker.total_output,
+                        )
 
             step_latency = time.time() - step_start
 
@@ -237,14 +352,30 @@ async def execute_topology(
             step_input_delta = (exec_tracker.total_input - input_before_step) // n_ran
             step_output_delta = (exec_tracker.total_output - output_before_step) // n_ran
 
-            # Per-node token budget warning
+            # Per-node token budget — hard enforcement.
+            # Why warn-only failed: nodes that overran (BatchRedditFetch returning
+            # 25 KB blobs into a 50 KB cap, or runaway ReAct loops) kept consuming
+            # the global budget unchecked. Aborting here surfaces the overrun to
+            # the master agent via the standard EXECUTION_FAILED sentinel path
+            # instead of silently bleeding cost.
             node_token_budget = resolved.constraints.max_tokens_per_node
             node_tokens_used = step_input_delta + step_output_delta
             if node_tokens_used > node_token_budget:
-                logger.warning(
-                    "Step %d exceeded per-node token budget: used %d tokens (budget: %d). "
-                    "Consider reducing max_react_iterations or parallel_instances.",
-                    step_num, node_tokens_used, node_token_budget,
+                msg = (
+                    f"NODE_BUDGET_EXCEEDED: step {step_num} nodes={list(nodes_ran)} "
+                    f"used {node_tokens_used} tokens (budget: {node_token_budget}). "
+                    f"Reduce max_react_iterations or parallel_instances, or simplify the system_prompt."
+                )
+                logger.error("execute_topology: %s", msg)
+                return ExecutionResult(
+                    topology_id=resolved.topology_id,
+                    final_output=f"EXECUTION_FAILED: {msg}",
+                    node_results=node_results,
+                    total_latency_seconds=round(time.time() - run_start, 3),
+                    success=False,
+                    error=msg,
+                    total_input_tokens=exec_tracker.total_input,
+                    total_output_tokens=exec_tracker.total_output,
                 )
 
             # Remap node_id keys → data_key keys in data_store
@@ -267,6 +398,12 @@ async def execute_topology(
                     node_results.append(nr)
                     if on_node_complete:
                         on_node_complete(nr)
+            logger.info(
+                "execute_topology: completed step %d/%d nodes=%s",
+                step_num,
+                total_steps,
+                step,
+            )
 
         # 5. Final output = last node's output
         last_nid = resolved.execution_order[-1][-1]

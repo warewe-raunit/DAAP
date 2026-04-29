@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
 from typing import Any
 
 
@@ -54,7 +53,6 @@ def build_master_runtime_snapshot(
     installed = _safe_installed_tool_names()
 
     snapshot: dict[str, Any] = {
-        "generated_at": datetime.now(timezone.utc).isoformat(),
         "agent_identity": "DAAP Master Agent",
         "agent_role": "orchestrator",
         "execution_mode": execution_mode,

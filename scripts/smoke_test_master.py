@@ -26,10 +26,6 @@ except ImportError:
 
 from agentscope.message import Msg
 from daap.master.agent import create_master_agent
-from daap.master.tools import (
-    clear_last_topology_result,
-    get_last_topology_result,
-)
 
 PROMPTS = [
     {
@@ -79,9 +75,9 @@ async def run_one(prompt_spec: dict) -> dict:
     print(f"Prompt: {prompt_spec['prompt']}")
     print("-" * 60)
 
-    clear_last_topology_result()
     master = create_master_agent()
     toolkit = master._daap_toolkit
+    toolkit.clear_last_topology_result()
 
     msg = Msg(name="user", content=prompt_spec["prompt"], role="user")
     agent_task = asyncio.create_task(master(msg))
@@ -97,7 +93,7 @@ async def run_one(prompt_spec: dict) -> dict:
     )
 
     # Classify what happened
-    topo = get_last_topology_result()
+    topo = toolkit.get_last_topology_result()
     pending_qs = toolkit.get_pending_questions()
 
     if topo.get("topology") is not None:
@@ -120,7 +116,7 @@ async def run_one(prompt_spec: dict) -> dict:
         print(f"  Estimated cost: ${est.get('total_cost_usd', 0):.3f}")
         print(f"  Estimated latency: {est.get('total_latency_seconds', 0):.0f}s")
 
-    clear_last_topology_result()
+    toolkit.clear_last_topology_result()
     return {"id": prompt_spec["id"], "passed": passed, "actual": actual, "expected": prompt_spec["expected"]}
 
 

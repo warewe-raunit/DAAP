@@ -51,11 +51,17 @@ def get_model_pricing(model_id: str) -> dict[str, float]:
 # Phase 1: tool names resolve to string identifiers.
 # Phase 3: becomes a registry of actual tool instances.
 TOOL_REGISTRY: dict[str, str] = {
-    "WebSearch": "agentscope.tools.WebSearch",
-    "WebFetch": "agentscope.tools.WebFetch",
-    "ReadFile": "agentscope.tools.ReadFile",
-    "WriteFile": "agentscope.tools.WriteFile",
-    "CodeExecution": "agentscope.tools.CodeExecution",
+    "WebSearch":               "agentscope.tools.WebSearch",
+    "WebFetch":                "agentscope.tools.WebFetch",
+    "DeepCrawl":               "agentscope.tools.DeepCrawl",
+    "RedditSearch":            "agentscope.tools.RedditSearch",
+    "RedditFetch":             "agentscope.tools.RedditFetch",
+    "BatchRedditFetch":        "agentscope.tools.BatchRedditFetch",
+    "KeywordsEverywhere":      "agentscope.tools.KeywordsEverywhere",
+    "KeywordsEverywhereTraffic": "agentscope.tools.KeywordsEverywhereTraffic",
+    "ReadFile":                "agentscope.tools.ReadFile",
+    "WriteFile":               "agentscope.tools.WriteFile",
+    "CodeExecution":           "agentscope.tools.CodeExecution",
 }
 
 CONSOLIDATION_REGISTRY: dict[str, str] = {
@@ -82,10 +88,10 @@ class ResolvedNode:
     outputs: list                    # IOSchema objects (unchanged)
     parallel_instances: int
     consolidation_func: str | None   # e.g. "daap.executor.consolidation.merge_outputs"
-    consolidation_strategy: str | None  # e.g. "merge", "deduplicate", "rank", "vote"
-    handoff_mode: str                # enum value as string
-    agent_mode: str                  # "react" or "single"
-    max_react_iterations: int
+    consolidation_strategy: str | None = None  # e.g. "merge", "deduplicate", "rank", "vote"
+    handoff_mode: str = "never"      # enum value as string
+    agent_mode: str = "react"        # "react" or "single"
+    max_react_iterations: int = 10
     # Operator info — carried through for node_builder to select the right model class
     operator_provider: str = "openrouter"        # "openrouter" | "opencode" | ...
     operator_base_url: str | None = None          # None = provider SDK default

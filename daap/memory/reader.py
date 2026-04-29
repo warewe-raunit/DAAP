@@ -26,7 +26,7 @@ def load_user_profile(user_id: str, limit: int = 10) -> list[str]:
     try:
         client = get_memory_client()
         result = client.get_all(
-            **profile_scope(user_id),
+            filters=profile_scope(user_id),
             limit=limit,
         )
         record_memory_event("load_user_profile", True)
@@ -48,7 +48,7 @@ def search_user_profile(user_id: str, query: str, limit: int = 5) -> list[str]:
         client = get_memory_client()
         result = client.search(
             query=query,
-            **profile_scope(user_id),
+            filters=profile_scope(user_id),
             limit=limit,
         )
         record_memory_event("search_user_profile", True)
@@ -74,7 +74,7 @@ def load_master_history(user_id: str, query: str, limit: int = 5) -> list[str]:
         client = get_memory_client()
         result = client.search(
             query=query,
-            **master_scope(user_id),
+            filters=master_scope(user_id),
             limit=limit,
         )
         record_memory_event("load_master_history", True)

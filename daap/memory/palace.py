@@ -25,7 +25,7 @@ class DaapMemory:
     def __init__(self):
         self.available = reader.memory_is_available()
         if not self.available:
-            logger.warning("Memory unavailable — operating in degraded mode")
+            logger.info("Memory unavailable — operating in degraded mode")
             set_memory_status(False, "degraded mode")
         else:
             set_memory_status(True, "ready")

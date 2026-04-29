@@ -43,7 +43,7 @@ def make_resolved_node(
 
 
 @pytest.mark.asyncio
-@patch("daap.executor.node_builder.ReActAgent")
+@patch("daap.executor.node_builder.TerminatingReActAgent")
 @patch("daap.executor.node_builder.TrackedOpenAIChatModel")
 async def test_build_react_node(mock_model_cls, mock_agent_cls):
     mock_agent_cls.return_value = MagicMock()
@@ -65,7 +65,7 @@ async def test_build_react_node(mock_model_cls, mock_agent_cls):
 
 
 @pytest.mark.asyncio
-@patch("daap.executor.node_builder.ReActAgent")
+@patch("daap.executor.node_builder.TerminatingReActAgent")
 @patch("daap.executor.node_builder.TrackedOpenAIChatModel")
 async def test_build_single_node(mock_model_cls, mock_agent_cls):
     mock_agent_cls.return_value = MagicMock()
@@ -94,7 +94,7 @@ async def test_build_node_with_unknown_tool_raises(mock_model_cls):
 
 
 @pytest.mark.asyncio
-@patch("daap.executor.node_builder.ReActAgent")
+@patch("daap.executor.node_builder.TerminatingReActAgent")
 @patch("daap.executor.node_builder.TrackedOpenAIChatModel")
 async def test_build_node_anthropic_model_selection(mock_model_cls, mock_agent_cls):
     mock_agent_cls.return_value = MagicMock()
@@ -113,7 +113,7 @@ async def test_build_node_anthropic_model_selection(mock_model_cls, mock_agent_c
 
 
 @pytest.mark.asyncio
-@patch("daap.executor.node_builder.ReActAgent")
+@patch("daap.executor.node_builder.TerminatingReActAgent")
 @patch("daap.executor.node_builder.TrackedOpenAIChatModel")
 async def test_build_node_openrouter_model_selection(mock_model_cls, mock_agent_cls):
     mock_agent_cls.return_value = MagicMock()
@@ -134,7 +134,7 @@ async def test_build_node_openrouter_model_selection(mock_model_cls, mock_agent_
 
 
 @pytest.mark.asyncio
-@patch("daap.executor.node_builder.ReActAgent")
+@patch("daap.executor.node_builder.TerminatingReActAgent")
 @patch("daap.executor.node_builder.TrackedOpenAIChatModel")
 async def test_mcp_tool_skipped_not_raised(mock_model_cls, mock_agent_cls):
     """MCP tools should be skipped (with warning), not raise errors."""
@@ -150,7 +150,7 @@ async def test_mcp_tool_skipped_not_raised(mock_model_cls, mock_agent_cls):
 
 
 @pytest.mark.asyncio
-@patch("daap.executor.node_builder.ReActAgent")
+@patch("daap.executor.node_builder.TerminatingReActAgent")
 @patch("daap.executor.node_builder.TrackedOpenAIChatModel")
 async def test_build_node_exposes_isolated_agent_factory(mock_model_cls, mock_agent_cls):
     mock_model_cls.return_value = MagicMock()
@@ -175,7 +175,7 @@ async def test_build_node_exposes_isolated_agent_factory(mock_model_cls, mock_ag
 
 
 @pytest.mark.asyncio
-@patch("daap.executor.node_builder.ReActAgent")
+@patch("daap.executor.node_builder.TerminatingReActAgent")
 @patch("daap.executor.node_builder.TrackedOpenAIChatModel")
 async def test_build_node_applies_subagent_skills(mock_model_cls, mock_agent_cls):
     mock_agent_cls.return_value = MagicMock()

@@ -28,6 +28,16 @@ class MockAgent:
         self._response = response
 
     async def __call__(self, msg):
+        return await self.reply(msg)
+
+    async def reply(self, msg, structured_model=None):
+        if structured_model is not None:
+            return Msg(
+                name=self.name,
+                content=self._response,
+                role="assistant",
+                metadata={"result": self._response},
+            )
         return Msg(name=self.name, content=self._response, role="assistant")
 
 
@@ -44,6 +54,7 @@ def make_built_node(
         agent=MockAgent(node_id, response),
         parallel_instances=parallel_instances,
         consolidation_func=consolidation_func,
+        consolidation_strategy=None,
         agent_mode=agent_mode,
         operator_provider="anthropic",
         operator_base_url=None,
@@ -85,10 +96,21 @@ async def test_parallel_instances_use_isolated_agents_with_factory():
             created_agent_ids.append(self.agent_id)
 
         async def __call__(self, msg):
+            return await self.reply(msg)
+
+        async def reply(self, msg, structured_model=None):
             self.calls += 1
+            content = f"instance={self.agent_id};calls={self.calls}"
+            if structured_model is not None:
+                return Msg(
+                    name=f"agent_{self.agent_id}",
+                    content=content,
+                    role="assistant",
+                    metadata={"result": content},
+                )
             return Msg(
                 name=f"agent_{self.agent_id}",
-                content=f"instance={self.agent_id};calls={self.calls}",
+                content=content,
                 role="assistant",
             )
 
@@ -195,13 +217,19 @@ async def test_execution_step_uses_prior_output():
         def __init__(self, name):
             self.name = name
         async def __call__(self, msg):
-            return Msg(name=self.name, content=f"echo: {msg.content}", role="assistant")
+            return await self.reply(msg)
+        async def reply(self, msg, structured_model=None):
+            content = f"echo: {msg.content}"
+            if structured_model is not None:
+                return Msg(name=self.name, content=content, role="assistant", metadata={"result": content})
+            return Msg(name=self.name, content=content, role="assistant")
 
     node = BuiltNode(
         node_id="node_b",
         agent=EchoAgent("node_b"),
         parallel_instances=1,
         consolidation_func=None,
+        consolidation_strategy=None,
         agent_mode="single",
         operator_provider="anthropic",
         operator_base_url=None,
@@ -220,7 +248,10 @@ async def test_execution_step_uses_prior_output():
     initial = Msg(name="user", content="original prompt", role="user")
     result = await run_execution_step([node], prior_data, [FakeEdge()], initial)
 
-    assert "echo: lead data" in result["node_b"].content
+    # Production wraps upstream input in <node_output> tags for prompt-injection
+    # isolation, so the echo'd content is decorated rather than raw.
+    assert result["node_b"].content.startswith("echo:")
+    assert "lead data" in result["node_b"].content
     assert "original prompt" not in result["node_b"].content
 
 
@@ -232,13 +263,19 @@ async def test_first_node_gets_user_prompt():
         def __init__(self, name):
             self.name = name
         async def __call__(self, msg):
-            return Msg(name=self.name, content=f"echo: {msg.content}", role="assistant")
+            return await self.reply(msg)
+        async def reply(self, msg, structured_model=None):
+            content = f"echo: {msg.content}"
+            if structured_model is not None:
+                return Msg(name=self.name, content=content, role="assistant", metadata={"result": content})
+            return Msg(name=self.name, content=content, role="assistant")
 
     node = BuiltNode(
         node_id="first_node",
         agent=EchoAgent("first_node"),
         parallel_instances=1,
         consolidation_func=None,
+        consolidation_strategy=None,
         agent_mode="single",
         operator_provider="anthropic",
         operator_base_url=None,

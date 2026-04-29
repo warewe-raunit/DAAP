@@ -19,7 +19,7 @@ from agentscope.message import TextBlock
 from agentscope.tool import Toolkit, ToolResponse
 
 from daap.master.tools import (
-    generate_topology as generate_topology_tool,
+    _delegate_to_architect_impl,
     register_skill as register_skill_tool,
 )
 from daap.master.runtime import build_master_runtime_snapshot
@@ -43,10 +43,10 @@ class Session:
     master_agent: object | None = None          # ReActAgent (typed as object to avoid circular)
     conversation: list[dict] = field(default_factory=list)
 
-    # Topology state — stored as raw dict after generate_topology succeeds
+    # Topology state — stored as raw dict after delegate_to_architect succeeds
     pending_topology: dict | None = None        # raw TopologySpec dict
     pending_estimate: dict | None = None        # estimate data dict
-    topology_just_generated: bool = False       # set by generate_topology wrapper; cleared by ws_handler
+    topology_just_generated: bool = False       # set by delegate_to_architect wrapper; cleared by ws_handler
 
     # Execution state
     is_executing: bool = False
@@ -471,11 +471,34 @@ def create_session_scoped_toolkit(
     - Uses a per-session asyncio.Event — no cross-session interference
     - Attaches session._resolve_answers for the WebSocket handler to call
 
-    generate_topology is wrapped per session so we can inject user-selected
-    subagent model/operator settings before topology validation.
+    delegate_to_architect is wrapped per session so we can inject user-selected
+    subagent model/operator settings after the architect returns the topology.
     """
     toolkit = Toolkit()
     apply_configured_skills(toolkit, target="master")
+
+    # Per-session architect grounding context — set by the agent factory
+    # (create_master_agent_with_toolkit) after the runtime snapshot is built.
+    # Forwarded into the architect so it designs against today's date,
+    # connected MCP servers, known capability gaps, and user memory.
+    _architect_ctx: dict = {
+        "user_context": None,
+        "runtime_context": None,
+        "operator_config": None,
+    }
+
+    # Per-session topology handoff slot — replaces the prior ContextVar.
+    _last_topology: dict = {"topology": None, "estimate": None}
+
+    def set_architect_context(
+        *,
+        user_context: object = None,
+        runtime_context: dict | None = None,
+        operator_config: dict | None = None,
+    ) -> None:
+        _architect_ctx["user_context"] = user_context
+        _architect_ctx["runtime_context"] = runtime_context
+        _architect_ctx["operator_config"] = operator_config
 
     def _merge_operator_config(existing: dict | None, selected: dict) -> dict:
         existing_cfg = existing if isinstance(existing, dict) else {}
@@ -502,27 +525,31 @@ def create_session_scoped_toolkit(
         merged["model_map"] = model_map
         return merged
 
-    async def generate_topology(topology_json: str) -> ToolResponse:
-        """Session-scoped topology generation with optional operator/model injection."""
-        from daap.master.tools import _topology_result_var, clear_last_topology_result
+    async def delegate_to_architect(
+        current_topology_json: str,
+        user_feedback: str,
+    ) -> ToolResponse:
+        """Session-scoped topology architect delegation with optional operator/model injection."""
+        result = await _delegate_to_architect_impl(
+            current_topology_json,
+            user_feedback,
+            user_context=_architect_ctx.get("user_context"),
+            runtime_context=_architect_ctx.get("runtime_context"),
+            operator_config=_architect_ctx.get("operator_config"),
+        )
 
-        selected = session.subagent_operator_config
-        if not selected:
-            result = await generate_topology_tool(topology_json)
-        else:
-            try:
-                topology_dict = json.loads(topology_json)
-            except json.JSONDecodeError:
-                result = await generate_topology_tool(topology_json)
-            else:
-                # Enforce user-selected default operator/model map for all subagents.
-                topology_dict["operator_config"] = _merge_operator_config(
-                    topology_dict.get("operator_config"),
+        # Read topology directly from the impl's structured ToolResponse.metadata.
+        meta = result.metadata or {}
+        topo_dict = meta.get("topology")
+        estimate = meta.get("estimate")
+        if topo_dict is not None:
+            selected = session.subagent_operator_config
+            if selected:
+                topo_dict["operator_config"] = _merge_operator_config(
+                    topo_dict.get("operator_config"),
                     selected,
                 )
-
-                # Node-level overrides still exist, but user selection should win.
-                for node in topology_dict.get("nodes", []):
+                for node in topo_dict.get("nodes", []):
                     if not isinstance(node, dict):
                         continue
                     if node.get("operator_override") is not None:
@@ -531,21 +558,27 @@ def create_session_scoped_toolkit(
                             selected,
                         )
 
-                result = await generate_topology_tool(json.dumps(topology_dict))
-
-        # ContextVar is only visible within the same asyncio task.
-        # We're inside the agent task here — read it now and store on session
-        # so ws_handler can access it after the task completes.
-        topo_result = _topology_result_var.get()
-        if topo_result["topology"] is not None:
-            session.pending_topology = topo_result["topology"]
-            session.pending_estimate = topo_result["estimate"]
+            session.pending_topology = topo_dict
+            session.pending_estimate = estimate
             session.topology_just_generated = True
-            clear_last_topology_result()
+            # Mirror into per-session slot for parse_turn_result. Cleared by
+            # the agent layer after consumption — not here.
+            _last_topology["topology"] = topo_dict
+            _last_topology["estimate"] = estimate
 
         return result
 
-    toolkit.register_tool_function(generate_topology)
+    def get_last_topology_result() -> dict:
+        return {
+            "topology": _last_topology["topology"],
+            "estimate": _last_topology["estimate"],
+        }
+
+    def clear_last_topology_result() -> None:
+        _last_topology["topology"] = None
+        _last_topology["estimate"] = None
+
+    toolkit.register_tool_function(delegate_to_architect)
 
     # Per-session file permission state
     _perm_event: asyncio.Event = asyncio.Event()
@@ -574,15 +607,17 @@ def create_session_scoped_toolkit(
     session._questions_event = _questions_event
 
     async def ask_user(questions_json: str) -> ToolResponse:
-        """Ask the user clarifying questions before proceeding.
+        """Present structured options to the user and wait for their choice.
 
-        Call this tool when you need more information from the user to do
-        your job well. DO NOT guess or make assumptions. Ask instead.
+        Use ONLY for structured option-picker flows where the user must choose
+        between labeled alternatives — not for open-ended clarification questions.
 
-        Use BEFORE calling generate_topology if the user's request is
-        missing: product/service details, target audience, preferences,
-        volume, or output format. Also use to present a topology plan
-        and get approval: proceed, make cheaper, modify, or cancel.
+        Primary use cases:
+        - Topology approval: "Proceed / Make it cheaper / Cancel"
+        - Any other explicit multiple-choice decision
+
+        For open-ended clarification (missing product, audience, format, etc.),
+        ask in plain text instead and let the user reply in the next turn.
 
         Args:
             questions_json: JSON array of question objects. Each has:
@@ -590,11 +625,10 @@ def create_session_scoped_toolkit(
                 - "options": array of {"label": str, "description": str}
                 - "multi_select": boolean
 
-                Keep to 1-4 questions. List recommended option first
-                and mark with "(Recommended)".
+                Keep to 1-4 questions. Mark recommended option with "(Recommended)".
 
         Returns:
-            The user's answers to your questions.
+            The user's selected answers.
         """
         try:
             questions = json.loads(questions_json)
@@ -643,6 +677,32 @@ def create_session_scoped_toolkit(
                 type="text",
                 text="User did not provide answers. Proceed with what you know or ask again.",
             )])
+            
+        # Direct execution safeguard: if the user's answer implies approval,
+        # execute directly to prevent the master agent from hallucinating or 
+        # forgetting to call execute_pending_topology.
+        if session.pending_topology is not None and answers:
+            ans_lower = " ".join(answers[0].strip().lower().split())
+            approve_phrases = {
+                "yes", "yes execute", "approve", "proceed", "run", "execute", 
+                "run it", "execute it", "proceed with this topology and continue."
+            }
+            if ans_lower in approve_phrases:
+                logger.info("ask_user tool detected approval. Directly executing topology %s", session.pending_topology.get("topology_id"))
+                session.topology_just_generated = False
+                return await execute_pending_topology()
+
+            cancel_phrases = {
+                "cancel", "abort", "stop"
+            }
+            if ans_lower in cancel_phrases:
+                logger.info("ask_user tool detected cancel.")
+                session.pending_topology = None
+                session.pending_estimate = None
+                return ToolResponse(content=[TextBlock(
+                    type="text",
+                    text="User cancelled the topology. Acknowledge and ask what to do next."
+                )])
 
         lines = []
         for i, q in enumerate(questions):
@@ -761,6 +821,35 @@ def create_session_scoped_toolkit(
     # ------------------------------------------------------------------
 
     if topology_store is not None:
+
+        async def list_saved_topologies() -> ToolResponse:
+            """List all saved topologies with their IDs and names.
+
+            Call this FIRST before rerun_topology or load_topology when the user
+            asks to rerun, edit, or reference a saved topology. Use the exact
+            topology_id from this list — never guess an ID.
+
+            Returns:
+                A list of saved topologies with id, name, and creation date.
+            """
+            from datetime import datetime as _dt
+            topologies = topology_store.list_topologies(user_id=session.user_id)
+            if not topologies:
+                return ToolResponse(content=[TextBlock(
+                    type="text",
+                    text="No saved topologies found.",
+                )])
+            lines = []
+            for t in topologies:
+                created = _dt.fromtimestamp(t.created_at).strftime("%Y-%m-%d %H:%M")
+                lines.append(
+                    f"- topology_id: {t.topology_id!r} | name: {t.name!r} | "
+                    f"created: {created} | version: {t.version}"
+                )
+            return ToolResponse(content=[TextBlock(
+                type="text",
+                text="Saved topologies:\n" + "\n".join(lines),
+            )])
 
         async def load_topology(topology_id: str, version: int | None = None) -> ToolResponse:
             """Load a saved topology into session.pending_topology for editing or rerun."""
@@ -893,6 +982,7 @@ def create_session_scoped_toolkit(
                     text=f"Rerun error: {exc}",
                 )])
 
+        toolkit.register_tool_function(list_saved_topologies)
         toolkit.register_tool_function(load_topology)
         toolkit.register_tool_function(persist_topology)
         toolkit.register_tool_function(rerun_topology)
@@ -918,7 +1008,7 @@ def create_session_scoped_toolkit(
         if session.pending_topology is None:
             return ToolResponse(content=[TextBlock(
                 type="text",
-                text="No pending topology to execute. Call generate_topology first.",
+                text="No pending topology to execute. Call delegate_to_architect first.",
             )])
 
         if session.is_executing:
@@ -935,6 +1025,11 @@ def create_session_scoped_toolkit(
         topo_id = topo_dict.get("topology_id", "unknown")
         user_prompt = topo_dict.get("user_prompt", "")
         ws_send = session._ws_send  # None in CLI, set by ws_handler for WebSocket
+        logger.info(
+            "execute_pending_topology: requested session=%s topology=%s",
+            session.session_id,
+            topo_id,
+        )
 
         try:
             # RL: recommend model tier per role via LinTS (non-fatal)
@@ -970,12 +1065,23 @@ def create_session_scoped_toolkit(
             resolved = resolve_topology(spec)
             if isinstance(resolved, list):
                 errors = "; ".join(e.message for e in resolved)
+                logger.warning(
+                    "execute_pending_topology: resolution failed topology=%s errors=%s",
+                    topo_id,
+                    errors,
+                )
                 return ToolResponse(content=[TextBlock(
                     type="text",
                     text=f"Topology resolution failed: {errors}",
                 )])
 
             total_nodes = len(resolved.nodes)
+            logger.info(
+                "execute_pending_topology: starting topology=%s nodes=%d order=%s",
+                topo_id,
+                total_nodes,
+                resolved.execution_order,
+            )
             session.is_executing = True
             if session_store is not None:
                 session_store.set_executing(session.session_id, True)
@@ -999,6 +1105,14 @@ def create_session_scoped_toolkit(
             completed_nodes = 0
 
             def _on_node_start(node_id: str, model_id: str, step_num: int, total: int) -> None:
+                logger.info(
+                    "execute_pending_topology: node_start topology=%s node=%s model=%s step=%d/%d",
+                    topo_id,
+                    node_id,
+                    model_id,
+                    step_num,
+                    total,
+                )
                 session.execution_progress.update({
                     "current_node": node_id,
                     "completed_nodes": completed_nodes,
@@ -1022,6 +1136,12 @@ def create_session_scoped_toolkit(
             def _on_node_complete(nr) -> None:
                 nonlocal completed_nodes
                 completed_nodes += 1
+                logger.info(
+                    "execute_pending_topology: node_complete topology=%s node=%s latency=%.3fs",
+                    topo_id,
+                    nr.node_id,
+                    nr.latency_seconds,
+                )
                 pct = int((completed_nodes / total_nodes) * 100) if total_nodes else 100
                 session.execution_progress.update({
                     "completed_nodes": completed_nodes,
@@ -1031,22 +1151,34 @@ def create_session_scoped_toolkit(
                 })
                 # Memory: write agent diary entry (fire-and-forget)
                 if daap_memory is not None:
-                    try:
-                        node_role = next(
-                            (n.get("role", "unknown") for n in topo_dict.get("nodes", [])
-                             if isinstance(n, dict) and n.get("node_id") == nr.node_id),
-                            "unknown",
-                        )
-                        daap_memory.remember_node_output(
-                            user_id=session.user_id,
-                            role=node_role,
-                            node_output=getattr(nr, "output_text", ""),
-                            latency_seconds=getattr(nr, "latency_seconds", 0.0),
-                            model_used=getattr(nr, "model_id", "unknown"),
-                            success=True,
-                        )
-                    except Exception as exc:
-                        logger.warning("Node memory write failed (non-fatal): %s", exc, exc_info=True)
+                    node_role = next(
+                        (n.get("role", "unknown") for n in topo_dict.get("nodes", [])
+                         if isinstance(n, dict) and n.get("node_id") == nr.node_id),
+                        "unknown",
+                    )
+                    
+                    def _write_mem(r, out_text, lat, mod):
+                        try:
+                            daap_memory.remember_node_output(
+                                user_id=session.user_id,
+                                role=r,
+                                node_output=out_text,
+                                latency_seconds=lat,
+                                model_used=mod,
+                                success=True,
+                            )
+                        except Exception as exc:
+                            logger.warning("Node memory write failed (non-fatal): %s", exc, exc_info=True)
+                    
+                    import asyncio
+                    asyncio.get_running_loop().run_in_executor(
+                        None, 
+                        _write_mem,
+                        node_role,
+                        getattr(nr, "output_text", ""),
+                        getattr(nr, "latency_seconds", 0.0),
+                        getattr(nr, "model_id", "unknown")
+                    )
                 if ws_send:
                     import asyncio
                     asyncio.get_running_loop().create_task(ws_send({
@@ -1070,6 +1202,13 @@ def create_session_scoped_toolkit(
                 user_id=session.user_id,
                 permission_fn=session._file_permission_fn,
             )
+            logger.info(
+                "execute_pending_topology: finished topology=%s success=%s latency=%.3fs error=%s",
+                topo_id,
+                result.success,
+                result.total_latency_seconds,
+                result.error,
+            )
 
             session.execution_result = {
                 "topology_id": result.topology_id,
@@ -1083,43 +1222,51 @@ def create_session_scoped_toolkit(
 
             # Write run summary to memory (non-fatal, always — not gated on success)
             if daap_memory is not None:
-                try:
-                    from daap.memory.writer import (
-                        write_run_to_memory,
-                        write_agent_learnings_from_run,
-                    )
-                    topology_summary = topo_dict.get("user_prompt", "topology run")[:120]
-                    write_run_to_memory(
-                        memory=daap_memory,
-                        user_id=session.user_id,
-                        topology_summary=topology_summary,
-                        execution_result=result,
-                    )
-                    write_agent_learnings_from_run(
-                        memory=daap_memory,
-                        execution_result=result,
-                        topology_nodes=topo_dict.get("nodes", []),
-                    )
-                except Exception as _mem_exc:
-                    logger.warning("Memory write failed (non-fatal): %s", _mem_exc)
+                def _write_run_mem(exec_res, topo_nodes):
+                    try:
+                        from daap.memory.writer import (
+                            write_run_to_memory,
+                            write_agent_learnings_from_run,
+                        )
+                        topology_summary = topo_dict.get("user_prompt", "topology run")[:120]
+                        write_run_to_memory(
+                            memory=daap_memory,
+                            user_id=session.user_id,
+                            topology_summary=topology_summary,
+                            execution_result=exec_res,
+                        )
+                        write_agent_learnings_from_run(
+                            memory=daap_memory,
+                            execution_result=exec_res,
+                            topology_nodes=topo_nodes,
+                        )
+                    except Exception as _mem_exc:
+                        logger.warning("Memory write failed (non-fatal): %s", _mem_exc)
+                
+                import asyncio
+                asyncio.get_running_loop().run_in_executor(None, _write_run_mem, result, topo_dict.get("nodes", []))
 
             # Auto-save topology + run
             if topology_store is not None:
-                try:
-                    saved = topology_store.save_topology(
-                        spec=topo_dict,
-                        user_id=session.user_id,
-                        overwrite=True,
-                    )
-                    topology_store.save_run(
-                        topology_id=saved.topology_id,
-                        topology_version=saved.version,
-                        user_id=session.user_id,
-                        result=session.execution_result,
-                        user_prompt=user_prompt,
-                    )
-                except Exception as _save_exc:
-                    logger.warning("Auto-save failed (non-fatal): %s", _save_exc)
+                def _save_store(exec_res):
+                    try:
+                        saved = topology_store.save_topology(
+                            spec=topo_dict,
+                            user_id=session.user_id,
+                            overwrite=True,
+                        )
+                        topology_store.save_run(
+                            topology_id=saved.topology_id,
+                            topology_version=saved.version,
+                            user_id=session.user_id,
+                            result=exec_res,
+                            user_prompt=user_prompt,
+                        )
+                    except Exception as _save_exc:
+                        logger.warning("Auto-save failed (non-fatal): %s", _save_exc)
+                
+                import asyncio
+                asyncio.get_running_loop().run_in_executor(None, _save_store, session.execution_result)
 
             session.pending_topology = None
             session.pending_estimate = None
@@ -1127,7 +1274,9 @@ def create_session_scoped_toolkit(
             if ws_send:
                 await ws_send({
                     "type": "result",
+                    "success": result.success,
                     "output": result.final_output,
+                    "error": result.error,        # markdown trace on failure, None on success
                     "latency_seconds": result.total_latency_seconds,
                     "models_used": result.models_used,
                     "usage": {
@@ -1152,8 +1301,33 @@ def create_session_scoped_toolkit(
                     text=f"Execution failed: {result.error}",
                 )])
 
+        except asyncio.CancelledError:
+            logger.info("execute_pending_topology cancelled for %s", topo_id)
+            if ws_send:
+                try:
+                    import asyncio
+                    asyncio.get_running_loop().create_task(ws_send({
+                        "type": "result",
+                        "success": False,
+                        "output": "",
+                        "error": "Execution was cancelled by the user.",
+                    }))
+                except Exception:
+                    pass
+            raise  # Let it bubble up to ws_handler
         except Exception as exc:
             logger.exception("execute_pending_topology tool failed for %s", topo_id)
+            # Send failure to UI so it stops showing "executing"
+            if ws_send:
+                try:
+                    await ws_send({
+                        "type": "result",
+                        "success": False,
+                        "output": "",
+                        "error": f"Internal error: {exc}",
+                    })
+                except Exception:
+                    pass
             return ToolResponse(content=[TextBlock(
                 type="text",
                 text=f"Execution error: {exc}",
@@ -1164,5 +1338,9 @@ def create_session_scoped_toolkit(
                 session_store.set_executing(session.session_id, False)
 
     toolkit.register_tool_function(execute_pending_topology)
+
+    toolkit.set_architect_context = set_architect_context
+    toolkit.get_last_topology_result = get_last_topology_result
+    toolkit.clear_last_topology_result = clear_last_topology_result
 
     return toolkit

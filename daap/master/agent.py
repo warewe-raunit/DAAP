@@ -10,20 +10,17 @@ from dataclasses import dataclass, field
 
 from agentscope.agent import ReActAgent
 from agentscope.formatter import OpenAIChatFormatter
-from agentscope.memory import InMemoryMemory
 from agentscope.message import Msg
 from agentscope.model import OpenAIChatModel
 
+from daap.executor.context_manager import BoundedMemory
 from daap.executor.tracked_model import TrackedOpenAIChatModel
 from daap.master.runtime import build_master_runtime_snapshot
 from daap.tools.token_tracker import TokenTracker
 
+from daap.master.planner import plan_turn
 from daap.master.prompts import get_master_system_prompt
-from daap.master.tools import (
-    clear_last_topology_result,
-    create_master_toolkit,
-    get_last_topology_result,
-)
+from daap.master.tools import create_master_toolkit
 from daap.tools.registry import get_available_tool_names
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
@@ -88,9 +85,10 @@ def _build_model_and_formatter(
         api_key=os.environ.get(api_key_env, ""),
         client_kwargs=client_kwargs,
         stream=False,
+        generate_kwargs={"temperature": 0.2},  # seed removed — identical inputs repeat same broken JSON on retry
         tracker=tracker,
     )
-    return model, OpenAIChatFormatter()
+    return model, OpenAIChatFormatter(), model_id
 
 
 # ---------------------------------------------------------------------------
@@ -111,12 +109,21 @@ def create_master_agent(
     tracker: optional TokenTracker for recording token usage.
     """
     toolkit = create_master_toolkit()
-    model, formatter = _build_model_and_formatter(operator_config, tracker)
+    model, formatter, model_id = _build_model_and_formatter(operator_config, tracker)
     snapshot = build_master_runtime_snapshot(
         toolkit,
         execution_mode="script",
         extra=runtime_context,
     )
+
+    # Inject grounding context into the architect — see topology_agent.py.
+    set_ctx = getattr(toolkit, "set_architect_context", None)
+    if callable(set_ctx):
+        set_ctx(
+            user_context=user_context,
+            runtime_context=snapshot,
+            operator_config=operator_config,
+        )
 
     agent = ReActAgent(
         name="DAAP",
@@ -127,13 +134,17 @@ def create_master_agent(
         ),
         model=model,
         formatter=formatter,
-        memory=InMemoryMemory(),
+        memory=BoundedMemory(model_id),
         toolkit=toolkit,
-        max_iters=15,
+        max_iters=12,
     )
     # Attach toolkit so parse_turn_result can check per-instance ask_user state
     agent._daap_toolkit = toolkit
     agent._daap_runtime_context = snapshot
+    agent._daap_base_sys_prompt = agent._sys_prompt  # frozen base for per-turn hint injection
+    # Store model/formatter for plan_turn reuse (no extra credentials needed)
+    agent._daap_model = model
+    agent._daap_formatter = formatter
     return agent
 
 
@@ -150,12 +161,21 @@ def create_master_agent_with_toolkit(
     Used by the API layer to inject a session-scoped ask_user closure.
     tracker: optional TokenTracker for recording token usage.
     """
-    model, formatter = _build_model_and_formatter(operator_config, tracker)
+    model, formatter, model_id = _build_model_and_formatter(operator_config, tracker)
     snapshot = build_master_runtime_snapshot(
         toolkit,
         execution_mode="api-session",
         extra=runtime_context,
     )
+
+    # Inject grounding context into the architect — see topology_agent.py.
+    set_ctx = getattr(toolkit, "set_architect_context", None)
+    if callable(set_ctx):
+        set_ctx(
+            user_context=user_context,
+            runtime_context=snapshot,
+            operator_config=operator_config,
+        )
 
     agent = ReActAgent(
         name="DAAP",
@@ -166,13 +186,34 @@ def create_master_agent_with_toolkit(
         ),
         model=model,
         formatter=formatter,
-        memory=InMemoryMemory(),
+        memory=BoundedMemory(model_id),
         toolkit=toolkit,
-        max_iters=15,
+        max_iters=12,
     )
     agent._daap_toolkit = toolkit
     agent._daap_runtime_context = snapshot
+    agent._daap_base_sys_prompt = agent._sys_prompt  # frozen base for per-turn hint injection
+    agent._daap_model = model
+    agent._daap_formatter = formatter
     return agent
+
+
+# ---------------------------------------------------------------------------
+# Plan injection
+# ---------------------------------------------------------------------------
+
+def _inject_plan_hint(agent: ReActAgent, plan) -> None:
+    """
+    Write the plan hint into the system prompt for this turn.
+
+    Injecting into sys_prompt (not the user message) keeps the user turn
+    clean conversational input. The model attends to system-prompt guidance
+    during reasoning, not as part of the user's request.
+    """
+    base = getattr(agent, "_daap_base_sys_prompt", agent._sys_prompt)
+    agent._daap_base_sys_prompt = base  # idempotent — ensure stored
+    agent._sys_prompt = base + plan.hint()  # property has no setter; write the backing attr
+    agent.max_iters = plan.max_iters
 
 
 # ---------------------------------------------------------------------------
@@ -184,9 +225,9 @@ def parse_turn_result(response_msg: Msg, master: ReActAgent) -> MasterAgentTurnR
     Parse the master agent's response into a structured turn result.
 
     Detection is TOOL-BASED, not heuristic:
-    - ask_user called   → is_asking_questions=True
-    - generate_topology called and succeeded → has_topology=True
-    - Neither           → direct response
+    - ask_user called             → is_asking_questions=True
+    - delegate_to_architect succeeded → has_topology=True
+    - Neither                     → direct response
     """
     text = (
         response_msg.content
@@ -206,7 +247,8 @@ def parse_turn_result(response_msg: Msg, master: ReActAgent) -> MasterAgentTurnR
             needs_user_input=True,
         )
 
-    topo_result = get_last_topology_result()
+    get_topo = getattr(toolkit, "get_last_topology_result", None)
+    topo_result = get_topo() if callable(get_topo) else {"topology": None, "estimate": None}
     if topo_result.get("topology") is not None:
         result = MasterAgentTurnResult(
             response_text=text,
@@ -216,7 +258,9 @@ def parse_turn_result(response_msg: Msg, master: ReActAgent) -> MasterAgentTurnR
             is_asking_questions=False,
             needs_user_input=True,
         )
-        clear_last_topology_result()
+        clear_topo = getattr(toolkit, "clear_last_topology_result", None)
+        if callable(clear_topo):
+            clear_topo()
         return result
 
     return MasterAgentTurnResult(
@@ -237,8 +281,16 @@ async def run_master_conversation(
     operator_config: dict | None = None,
 ) -> dict:
     """Start a conversation with the master agent."""
-    clear_last_topology_result()
+    model, formatter, _ = _build_model_and_formatter(operator_config)
     master = create_master_agent(user_context, operator_config)
+    clear_topo = getattr(master._daap_toolkit, "clear_last_topology_result", None)
+    if callable(clear_topo):
+        clear_topo()
+
+    # Plan-and-execute: classify intent before the ReAct loop so the executor
+    # arrives with a concrete plan instead of deliberating from scratch.
+    plan = await plan_turn(user_prompt, model, formatter)
+    _inject_plan_hint(master, plan)  # hint → sys_prompt; also sets max_iters
 
     msg = Msg(name="user", content=user_prompt, role="user")
     conversation = [{"role": "user", "content": user_prompt}]
@@ -252,14 +304,27 @@ async def run_master_conversation(
         "master_agent": master,
         "turn_result": turn_result,
         "conversation": conversation,
+        "plan": plan,
     }
 
 
 async def continue_conversation(master: ReActAgent, user_message: str) -> dict:
     """Continue an ongoing conversation with the master agent."""
-    clear_last_topology_result()
+    clear_topo = getattr(master._daap_toolkit, "clear_last_topology_result", None)
+    if callable(clear_topo):
+        clear_topo()
+
+    # Reuse model/formatter stored on agent — no extra credentials needed.
+    model = getattr(master, "_daap_model", None)
+    formatter = getattr(master, "_daap_formatter", None)
+    if model is not None and formatter is not None:
+        plan = await plan_turn(user_message, model, formatter)
+        _inject_plan_hint(master, plan)  # hint → sys_prompt; also sets max_iters
+    else:
+        plan = None
+
     msg = Msg(name="user", content=user_message, role="user")
     response_msg = await master(msg)
     turn_result = parse_turn_result(response_msg, master)
 
-    return {"master_agent": master, "turn_result": turn_result}
+    return {"master_agent": master, "turn_result": turn_result, "plan": plan}
