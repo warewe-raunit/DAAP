@@ -408,11 +408,12 @@ async def generate_topology(
     )
     formatter = OpenAIChatFormatter()
 
+    from agentscope.message import Msg
     msgs = [
-        {"role": "system", "content": sys_prompt},
-        {"role": "user", "content": user_msg},
+        Msg(name="system", role="system", content=sys_prompt),
+        Msg(name="user", role="user", content=user_msg),
     ]
-    formatted = formatter.format_messages(msgs)
+    formatted = await formatter.format(msgs)
 
     try:
         response = await model(formatted)

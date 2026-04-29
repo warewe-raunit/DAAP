@@ -319,7 +319,7 @@ async def _llm_consolidate(
         formatter = OpenAIChatFormatter()
 
         msgs = [{"role": "user", "content": prompt}]
-        formatted = formatter.format_messages(msgs)
+        formatted = await formatter.format(msgs)
         response = await model(formatted)
         result_text = getattr(response, "content", None) or getattr(response, "text", None)
         if result_text is None:

@@ -95,6 +95,25 @@ class MaxRunsRequest(BaseModel):
     max_runs: int
 
 
+class TopologyCreateRequest(BaseModel):
+    spec: dict
+    name: str | None = None
+    user_id: str = "default"
+
+
+@router.post("")
+async def create_topology(req: TopologyCreateRequest):
+    """Manually save a topology spec. topology_id is taken from spec.topology_id."""
+    store = _get_store()
+    saved = store.save_topology(
+        spec=req.spec,
+        user_id=req.user_id,
+        name=req.name,
+        overwrite=False,
+    )
+    return _topology_to_dict(saved)
+
+
 @router.get("")
 async def list_topologies(
     user_id: str = Query(default="default"),

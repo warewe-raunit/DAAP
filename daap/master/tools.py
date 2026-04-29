@@ -148,7 +148,7 @@ async def _repair_topology_json(broken_json: str) -> dict | None:
             )
             formatter = OpenAIChatFormatter()
             msgs = [{"role": "user", "content": prompt}]
-            response = await model(formatter.format_messages(msgs))
+            response = await model(await formatter.format(msgs))
             text = _content_to_text(getattr(response, "content", None) or str(response))
             repaired = _extract_topology_json(text)
             if repaired is not None:

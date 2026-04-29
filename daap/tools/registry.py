@@ -31,6 +31,31 @@ from agentscope.tool import ToolResponse
 from agentscope.message import TextBlock
 
 
+def _make_browser_config():
+    """Return a crawl4ai BrowserConfig tuned for headless container runtime.
+
+    --no-sandbox          : required when running chromium as non-root in Docker
+                            without a properly namespaced sandbox.
+    --disable-dev-shm-usage: /dev/shm in containers is 64 MB by default;
+                            chromium crashes under load without this flag.
+    Returns None if crawl4ai is not installed (caller falls back).
+    """
+    try:
+        from crawl4ai import BrowserConfig  # type: ignore
+    except ImportError:
+        return None
+    return BrowserConfig(
+        headless=True,
+        browser_type="chromium",
+        verbose=False,
+        extra_args=[
+            "--no-sandbox",
+            "--disable-dev-shm-usage",
+            "--disable-gpu",
+        ],
+    )
+
+
 def _is_inside_cwd(filepath: str, cwd: Path) -> tuple[bool, Path]:
     """Resolve filepath and check if it lives inside cwd. Returns (inside, resolved)."""
     try:

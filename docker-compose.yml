@@ -1,20 +1,48 @@
+# ============================================================================
+# DAAP — Docker Compose (production)
+# ============================================================================
+# Quick start:
+#   cp .env.example .env   # fill in OPENROUTER_API_KEY + DAAP_API_KEY
+#   docker compose up -d --build
+#
+# Expose publicly:
+#   DAAP_BIND_ADDR=0.0.0.0 docker compose up -d
+#   (front with nginx/caddy for TLS — never expose plain HTTP to the internet)
+# ============================================================================
+
 services:
+
+  # --------------------------------------------------------------------------
+  # Qdrant — vector store for Mem0 memory
+  # --------------------------------------------------------------------------
   qdrant:
-    image: qdrant/qdrant:latest
+    image: qdrant/qdrant:v1.9.2   # pinned for reproducibility
     restart: unless-stopped
     volumes:
       - qdrant_data:/qdrant/storage
-    ports:
-      - "6333:6333"
+    expose:
+      - "6333"
+    # Qdrant has no built-in /health HTTP endpoint on older images;
+    # use a TCP probe instead.
     healthcheck:
       test: ["CMD-SHELL", "timeout 2 bash -c '</dev/tcp/localhost/6333' && echo ok"]
-      interval: 5s
-      timeout: 4s
+      interval: 10s
+      timeout: 5s
       retries: 15
       start_period: 30s
+    deploy:
+      resources:
+        limits:
+          memory: 512m
 
+  # --------------------------------------------------------------------------
+  # DAAP — main application
+  # --------------------------------------------------------------------------
   daap:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: daap:latest
     restart: unless-stopped
     depends_on:
       qdrant:
@@ -22,21 +50,54 @@ services:
     env_file:
       - .env
     environment:
+      # Vector store connection (must match qdrant service name above)
       QDRANT_HOST: qdrant
       QDRANT_PORT: "6333"
+      # Data directory (written to the daap_data volume below)
+      DAAP_DATA_DIR: /data
+      # Ensure Playwright finds its browsers
+      PLAYWRIGHT_BROWSERS_PATH: /opt/playwright
+      # Pydantic pure-Python mode (no Rust DLL dependency)
+      PYDANTIC_PURE_PYTHON: "1"
       PYTHONIOENCODING: "utf-8"
-      DAAP_DATA_DIR: /root/.daap
-    ports:
-      - "8000:8000"
-    volumes:
-      - daap_data:/root/.daap
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 60s
+      # Uncomment to change the model used for Playwright crawls:
+      # CRAWL4AI_BROWSER_TYPE: chromium
 
+    ports:
+      # Bind to loopback by default — front with nginx/caddy for TLS.
+      # Override in .env: DAAP_BIND_ADDR=0.0.0.0
+      - "${DAAP_BIND_ADDR:-127.0.0.1}:${DAAP_PORT:-8000}:8000"
+
+    volumes:
+      # Persistent SQLite databases + any written files
+      - daap_data:/data
+
+    # Chromium uses /dev/shm for shared memory. The Docker default is 64 MB
+    # which causes crashes under load.  128 MB is the minimum; 256 MB is safe.
+    shm_size: "256mb"
+
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 90s    # extra time for first-run Playwright browser init
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+    deploy:
+      resources:
+        limits:
+          # Chromium + Python workers — 2 GB is comfortable for 1 worker
+          memory: 2g
+
+# ============================================================================
+# Named volumes
+# ============================================================================
 volumes:
   qdrant_data:
   daap_data:

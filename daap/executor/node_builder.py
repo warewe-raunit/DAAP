@@ -326,6 +326,7 @@ async def build_node(
             f"\n- BatchRedditFetch returns a manifest with ACTIVE, REJECTED, and SKIPPED_DUE_TO_SIZE sections. Treat REJECTED and SKIPPED_DUE_TO_SIZE URLs as 'POST_NOT_READ'. NEVER fabricate body text for them."
             f"\n- Treat any post body containing 'I am a bot', 'I am a moderator of this subreddit', 'automatically performed', or 'action was performed automatically' as a bot/automod template. Mark it status='BOT_TEMPLATE' and exclude it from the result list."
             f"\n- If a critical tool fails permanently (same error after 2 retries with corrected args) and you cannot produce your required output, call generate_response with result starting exactly with: EXECUTION_FAILED: <reason>. This signals the pipeline to abort immediately."
+            f"\n- NEVER hallucinate or fabricate URLs, content, or data. If a search tool returns zero results and you have NO valid data after your allowed attempts, DO NOT make up results to satisfy your output contract. Instead, call generate_response with result exactly: EXECUTION_FAILED: No valid results found."
         )
     else:
         system_prompt += (

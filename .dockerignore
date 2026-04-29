@@ -1,17 +1,58 @@
+# ─── Secrets / local databases (never copy to image) ─────────────────────────
 .env
 .env.*
+!.env.example
 *.db
+*.db-shm
+*.db-wal
+
+# ─── Python build / cache ─────────────────────────────────────────────────────
 __pycache__
+**/__pycache__
 *.pyc
 *.pyo
+*.pyd
 .pytest_cache
-.git
-.gitignore
-graphify-out/
+.mypy_cache
+.ruff_cache
+.coverage
+htmlcov
+*.egg-info
+build
+dist
 .venv
 venv
-*.egg-info
-dist
-build
-CLAUDE.md
-daap/tests/
+env
+
+# ─── VCS / OS / editor ────────────────────────────────────────────────────────
+.git
+.gitignore
+.gitattributes
+.idea
+.vscode
+.DS_Store
+Thumbs.db
+
+# ─── Dev / doc artefacts not needed at runtime ────────────────────────────────
+graphify-out
+docs
+*.md
+!README.md
+test.py
+test_crawl4ai.py
+
+# ─── Test files ───────────────────────────────────────────────────────────────
+daap/tests
+daap/tools/test_*.py
+
+# ─── CI / tooling ─────────────────────────────────────────────────────────────
+.claude
+.code-review-graph
+scripts/patch_ws_handler.py
+scripts/chat.py
+scripts/prompt_iteration.py
+node_modules
+
+# ─── Local memory / session artefacts ────────────────────────────────────────
+memory
+optimizer.db

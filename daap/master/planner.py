@@ -106,7 +106,7 @@ async def plan_turn(user_message: str, model, formatter) -> PlanResult:
             },
         )
 
-        formatted = formatter.format_messages(msgs)
+        formatted = await formatter.format(msgs)
         response = await constrained(formatted)
         text = (getattr(response, "content", None) or str(response)).strip()
 
