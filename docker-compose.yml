@@ -24,12 +24,12 @@ services:
       - "6333"
     # Qdrant has no built-in /health HTTP endpoint on older images;
     # use a TCP probe instead.
-    healthcheck:
-      test: ["CMD-SHELL", "timeout 2 bash -c '</dev/tcp/localhost/6333' && echo ok"]
-      interval: 10s
-      timeout: 5s
-      retries: 15
-      start_period: 30s
+    # healthcheck:
+    #   test: ["CMD-SHELL", "timeout 2 bash -c '</dev/tcp/localhost/6333' && echo ok"]
+    #   interval: 10s
+    #   timeout: 5s
+    #   retries: 15
+    #   start_period: 30s
     deploy:
       resources:
         limits:
@@ -46,7 +46,7 @@ services:
     restart: unless-stopped
     depends_on:
       qdrant:
-        condition: service_healthy
+        condition: service_started
     env_file:
       - .env
     environment:
