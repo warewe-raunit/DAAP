@@ -38,6 +38,7 @@ graphify-out
 docs
 *.md
 !README.md
+*.log
 test.py
 test_crawl4ai.py
 
@@ -56,3 +57,4 @@ node_modules
 # ─── Local memory / session artefacts ────────────────────────────────────────
 memory
 optimizer.db
+.tmp_agentscope

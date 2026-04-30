@@ -55,6 +55,8 @@ services:
       QDRANT_PORT: "6333"
       # Data directory (written to the daap_data volume below)
       DAAP_DATA_DIR: /data
+      # Container listen port. Keep this in sync with the target port below.
+      PORT: "${DAAP_CONTAINER_PORT:-8000}"
       # Ensure Playwright finds its browsers
       PLAYWRIGHT_BROWSERS_PATH: /opt/playwright
       # Pydantic pure-Python mode (no Rust DLL dependency)
@@ -66,7 +68,7 @@ services:
     ports:
       # Bind to loopback by default — front with nginx/caddy for TLS.
       # Override in .env: DAAP_BIND_ADDR=0.0.0.0
-      - "${DAAP_BIND_ADDR:-127.0.0.1}:${DAAP_PORT:-8000}:8000"
+      - "${DAAP_BIND_ADDR:-127.0.0.1}:${DAAP_PORT:-8000}:${DAAP_CONTAINER_PORT:-8000}"
 
     volumes:
       # Persistent SQLite databases + any written files
@@ -77,7 +79,7 @@ services:
     shm_size: "256mb"
 
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/health"]
+      test: ["CMD-SHELL", "curl -fsS \"http://127.0.0.1:$${PORT:-8000}/health\""]
       interval: 30s
       timeout: 10s
       retries: 3

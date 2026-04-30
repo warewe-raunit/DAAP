@@ -13,6 +13,7 @@ FROM python:3.12-slim AS base
 ENV PYTHONIOENCODING=utf-8 \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
+    PORT=8000 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PIP_NO_CACHE_DIR=1 \
     # Tell pydantic to use pure-Python mode (avoids jiter Rust DLL issues
@@ -117,18 +118,11 @@ USER daap
 EXPOSE 8000
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
-    CMD curl -fsS http://127.0.0.1:8000/health || exit 1
+    CMD curl -fsS "http://127.0.0.1:${PORT:-8000}/health" || exit 1
 
 # ---------------------------------------------------------------------------
 # Entrypoint
 # ---------------------------------------------------------------------------
 # tini reaps zombie processes produced by Playwright/Chromium child processes.
 ENTRYPOINT ["/usr/bin/tini", "--"]
-CMD ["uvicorn", "daap.main:app", \
-     "--host", "0.0.0.0", \
-     "--port", "8000", \
-     "--ws", "wsproto", \
-     "--workers", "1", \
-     "--proxy-headers", \
-     "--forwarded-allow-ips", "*", \
-     "--log-level", "info"]
+CMD ["sh", "-c", "exec uvicorn daap.main:app --host 0.0.0.0 --port ${PORT:-8000} --ws wsproto --workers ${WEB_CONCURRENCY:-1} --proxy-headers --forwarded-allow-ips '*' --log-level ${LOG_LEVEL:-info}"]
